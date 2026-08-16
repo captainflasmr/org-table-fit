@@ -161,15 +161,67 @@ allocation rounds up)."
 
 ;; -> text-wrapping
 
+(defconst org-table-fit--inline-markup-regexp
+  (rx (or (seq "=" (group (one-or-more (not (any "=" "\n")))) "=")
+          (seq "~" (group (one-or-more (not (any "~" "\n")))) "~")
+          (seq "[[" (group (one-or-more (not (any "]" "\n"))))
+               (optional (seq "[" (zero-or-more (not (any "]" "\n"))) "]"))
+               "]]")))
+  "Match an org inline markup span that must stay intact while wrapping.
+Covers verbatim `=...=', code `~...~', and links `[[target]]' /
+`[[target][desc]]'.")
+
+(defun org-table-fit--tokenize (text)
+  "Split TEXT into wrap tokens, keeping org inline markup spans whole.
+
+Markup spans matched by `org-table-fit--inline-markup-regexp'
+\(`=...=', `~...~', `[[...]]') become single tokens, so a span like
+`=C-x u=' is never split across lines.  Trailing punctuation (a
+comma, closing paren, ...) directly after a span attaches to the
+token, so `(=C-x u=)' wraps as one unit.  Everything else is split
+on whitespace like plain words."
+  (let ((tokens nil)
+        (pos 0)
+        (len (length text)))
+    (while (< pos len)
+      (let* ((span-info (save-match-data
+                          (when (string-match
+                                 org-table-fit--inline-markup-regexp text pos)
+                            (cons (match-beginning 0) (match-end 0)))))
+             (ws-info (save-match-data
+                        (when (string-match "[ \t]+" text pos)
+                          (cons (match-beginning 0) (match-end 0)))))
+             (span (car span-info)))
+        (cond
+         ((eq span pos)
+          (let ((end (cdr span-info)))
+            ;; Attach trailing punctuation so `(=C-x u=)' stays whole.
+            (while (and (< end len)
+                        (let ((ch (aref text end)))
+                          (and (not (memq ch '(?\s ?\t ?= ?~ ?\[ ?* ?_ ?/ ?+)))
+                               (< (char-width ch) 2))))
+              (setq end (1+ end)))
+            (push (substring text pos end) tokens)
+            (setq pos end)))
+         ((and ws-info (eq (car ws-info) pos))
+          (setq pos (cdr ws-info)))
+         (t
+          (let ((end (min (or span len) (or (car ws-info) len))))
+            (push (substring text pos end) tokens)
+            (setq pos end))))))
+    (nreverse tokens)))
+
 (defun org-table-fit--wrap-text (text width)
   "Wrap TEXT to fit within WIDTH display columns.
 
-Word-wraps at whitespace; a word wider than WIDTH is force-broken
-at character boundaries so no line exceeds WIDTH.  Returns a list of
-line strings.  An empty TEXT returns a single empty line."
+Word-wraps at whitespace, keeping org inline markup spans (`=...=',
+`~...~', `[[...]]') intact as single tokens.  A token wider than
+WIDTH is force-broken at character boundaries so no line exceeds
+WIDTH.  Returns a list of line strings.  An empty TEXT returns a
+single empty line."
   (if (<= (string-width text) width)
       (list text)
-    (let ((words (split-string text "[ \t]+" t))
+    (let ((words (org-table-fit--tokenize text))
           (lines nil)
           (cur ""))
       (dolist (word words)
@@ -204,11 +256,12 @@ line strings.  An empty TEXT returns a single empty line."
 
 A wrapped cell continues on following rows as org multi-line cells:
 continuation rows carry the remaining wrapped text in the same column
-and empty strings elsewhere.  Cells whose text starts with `='
-\(calc formulas) are never wrapped."
+and empty strings elsewhere.  Cells starting with `:=' (explicit calc
+formulas like `:=$1+$2') are never wrapped, since a formula must stay
+on one line.  Org verbatim markup (`=C-x C-s=') is wrapped normally."
   (let* ((wrapped (cl-mapcar (lambda (cell width)
                                (if (or (null cell) (string-empty-p cell)
-                                       (string-prefix-p "=" cell))
+                                       (string-prefix-p ":=" cell))
                                    (list cell)
                                  (org-table-fit--wrap-text cell width)))
                              cells widths))
@@ -251,23 +304,27 @@ Each row is (:cells CELLS) or (:hline t)."
         (forward-line 1)))
     (nreverse rows)))
 
-(defun org-table-fit--merge-continuations (rows)
+(defun org-table-fit--merge-continuations (rows &optional row-starts)
   "Merge continuation rows in ROWS into logical rows.
 
-Within a logical row, the set of non-empty columns can only shrink
-(columns finish and go empty).  When a previously-empty column
-reappears with content, a new logical row has started.  Content from
-continuation cells is joined with a single space.  Hline rows end the
-current logical row and are preserved in the result.
-
-The heuristic is ambiguous for tables that merely have consecutive
-rows with empty cells, so only call this on tables tagged
-`org-table-fit-wrapped' (see `org-table-fit--wrapped-table-p')."
+When ROW-STARTS (a list of booleans, one per row) is given, a row with
+a non-nil entry always starts a new logical row — this is how
+`org-table-fit-unwrap' recovers the exact original rows in the same
+session, since `org-table-fit-window' tags each logical row's first
+physical line with `org-table-fit-row-start'.  Without ROW-STARTS
+\(e.g. after reloading the file), the subset heuristic applies: within
+a logical row the set of non-empty columns can only shrink, and when a
+previously-empty column reappears with content a new logical row has
+started; consecutive rows where every column wraps to the same height
+are indistinguishable from continuations and get merged.  Hline rows
+end the current logical row and are preserved in the result."
   (let ((logical nil)
         (current nil)
         (prev-non-empty nil)
-        (num-cols 0))
+        (num-cols 0)
+        (idx -1))
     (dolist (row rows)
+      (setq idx (1+ idx))
       (if (eq (car row) :hline)
           (progn
             (when current
@@ -278,24 +335,26 @@ rows with empty cells, so only call this on tables tagged
                (non-empty (cl-loop for c in cells
                                    for i from 0
                                    unless (string-empty-p c)
-                                   collect i)))
+                                   collect i))
+               (continuation (and (not (and row-starts
+                                            (nth idx row-starts)))
+                                  prev-non-empty
+                                  (cl-every (lambda (i) (memq i prev-non-empty))
+                                            non-empty))))
           (setq num-cols (max num-cols (length cells)))
-          (let ((continuation (and prev-non-empty
-                                   (cl-every (lambda (i) (memq i prev-non-empty))
-                                             non-empty))))
-            (if continuation
-                (progn
-                  (unless current
-                    (setq current (make-list (length cells) "")))
-                  (cl-loop for c in cells
-                           for i from 0
-                           unless (string-empty-p c)
-                           do (setf (nth i current)
-                                    (string-trim-right
-                                     (concat (nth i current) " " c)))))
-              (when current
-                (push current logical))
-              (setq current (copy-sequence cells))))
+          (if continuation
+              (progn
+                (unless current
+                  (setq current (make-list (length cells) "")))
+                (cl-loop for c in cells
+                         for i from 0
+                         unless (string-empty-p c)
+                         do (setf (nth i current)
+                                  (string-trim-right
+                                   (concat (nth i current) " " c)))))
+            (when current
+              (push current logical))
+            (setq current (copy-sequence cells)))
           (setq prev-non-empty non-empty))))
     (when current
       (push current logical))
@@ -311,6 +370,31 @@ rows with empty cells, so only call this on tables tagged
 (defun org-table-fit--wrapped-table-p (beg end)
   "Return non-nil when the table between BEG and END was wrapped by us."
   (text-property-any beg end 'org-table-fit-wrapped t))
+
+(defun org-table-fit--collect-row-starts (beg end)
+  "Return a boolean per table row line between BEG and END.
+Non-nil when the line's first character carries
+`org-table-fit-row-start' (a logical-row boundary tagged by
+`org-table-fit-window')."
+  (let ((starts nil))
+    (save-excursion
+      (goto-char beg)
+      (while (< (point) end)
+        (push (get-text-property (point) 'org-table-fit-row-start) starts)
+        (forward-line 1)))
+    (nreverse starts)))
+
+(defun org-table-fit--tag-row-starts (beg row-starts)
+  "Tag logical-row boundaries in the table starting at BEG.
+ROW-STARTS is a boolean per table line, as returned by
+`org-table-fit--collect-row-starts'.  Each line with a non-nil entry
+gets `org-table-fit-row-start' on its first character."
+  (save-excursion
+    (goto-char beg)
+    (dolist (start row-starts)
+      (when start
+        (put-text-property (point) (1+ (point)) 'org-table-fit-row-start t))
+      (forward-line 1))))
 
 (defun org-table-fit--render-rows (rows indent)
   "Render ROWS as org table lines prefixed with INDENT.
@@ -364,7 +448,8 @@ The table is rewritten in place using org's native multi-line cells;
            (rows (org-table-fit--collect-rows beg end)))
       ;; Merge continuation rows from a previous fit of this buffer.
       (when (org-table-fit--wrapped-table-p beg end)
-        (setq rows (org-table-fit--merge-continuations rows)))
+        (setq rows (org-table-fit--merge-continuations
+                    rows (org-table-fit--collect-row-starts beg end))))
       (let* ((data-rows (cl-remove-if (lambda (r) (eq (car r) :hline)) rows))
              (cell-count (apply #'max 1 (mapcar (lambda (r)
                                                   (length (map-elt r :cells)))
@@ -385,27 +470,33 @@ The table is rewritten in place using org's native multi-line cells;
                      (org-table-fit--table-total-width natural) target)
           (let ((widths (org-table-fit--allocate-widths
                          natural minimum target)))
-            (let ((wrapped-rows
-                   (cl-loop for row in rows
-                            append
-                            (if (eq (car row) :hline)
-                                (list row)
-                              (let* ((cells (map-elt row :cells))
-                                     (padded (append cells
-                                                     (make-list
-                                                      (max 0 (- cell-count
-                                                                (length cells)))
-                                                      "")))
-                                     (physical (org-table-fit--wrap-row
-                                                padded widths)))
-                                (mapcar (lambda (prow) (list :cells prow))
-                                        physical))))))
+            (let* ((row-starts nil)
+                   (wrapped-rows
+                    (cl-loop for row in rows
+                             append
+                             (if (eq (car row) :hline)
+                                 (progn
+                                   (push nil row-starts)
+                                   (list row))
+                               (let* ((cells (map-elt row :cells))
+                                      (padded (append cells
+                                                      (make-list
+                                                       (max 0 (- cell-count
+                                                                 (length cells)))
+                                                       "")))
+                                      (physical (org-table-fit--wrap-row
+                                                 padded widths)))
+                                 (cl-loop for i from 0 below (length physical)
+                                          do (push (= i 0) row-starts))
+                                 (mapcar (lambda (prow) (list :cells prow))
+                                         physical))))))
               (delete-region beg end)
               (goto-char beg)
               (insert (org-table-fit--render-rows wrapped-rows indent))
               (let ((new-end (point)))
                 (put-text-property beg new-end 'org-table-fit-wrapped t))
               (org-table-align)
+              (org-table-fit--tag-row-starts beg (nreverse row-starts))
               (message "org-table-fit: wrapped table to %d columns"
                        (org-table-fit--table-total-width widths)))))))))
 
@@ -416,7 +507,12 @@ The table is rewritten in place using org's native multi-line cells;
 Each continuation row's cells are joined onto the row above, and the
 table is re-aligned.  Useful before re-fitting at a different width
 after the file was reloaded, or to restore the original single-line
-layout.  Note that `undo' restores the exact original text."
+layout.  When the table was wrapped by `org-table-fit-window' in this
+session, the logical-row boundaries tagged at wrap time are used and
+the original rows are recovered exactly.  Otherwise a subset heuristic
+applies (see `org-table-fit--merge-continuations'), which can merge
+consecutive rows whose cells all wrap to the same height.  Note that
+`undo' restores the exact original text."
   (interactive)
   (let ((bounds (org-table-fit--table-bounds)))
     (unless bounds
@@ -425,12 +521,16 @@ layout.  Note that `undo' restores the exact original text."
            (end (cdr bounds))
            (indent (org-table-fit--table-indent beg))
            (rows (org-table-fit--collect-rows beg end))
-           (replacement (org-table-fit--merge-continuations rows)))
+           (row-starts (when (org-table-fit--wrapped-table-p beg end)
+                         (org-table-fit--collect-row-starts beg end)))
+           (replacement (org-table-fit--merge-continuations rows row-starts)))
       (delete-region beg end)
       (goto-char beg)
       (insert (org-table-fit--render-rows replacement indent))
       (org-table-align)
-      (remove-text-properties beg (point) '(org-table-fit-wrapped t))
+      (remove-text-properties beg (point)
+                              '(org-table-fit-wrapped t
+                                org-table-fit-row-start t))
       (message "org-table-fit: unwrapped table"))))
 
 (provide 'org-table-fit)

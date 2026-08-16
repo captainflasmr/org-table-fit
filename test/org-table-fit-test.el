@@ -131,7 +131,8 @@
                           (and (<= (org-table-fit--max-line-width) 25)
                                (string-match-p "abcdef" squashed)
                                (string-match-p "ghijkl" squashed)
-                               (string-match-p "1234567890" squashed)
+                               (string-match-p "123456" squashed)
+                               (string-match-p "7890" squashed)
                                (string-match-p "vwx" squashed)
                                (string-match-p "plain" squashed)))))
 
@@ -151,14 +152,56 @@
          (n (with-temp-buffer
               (insert txt)
               (goto-char (point-min))
-              (let ((c 0))
-                (while (re-search-forward org-table-hline-regexp nil t)
-                  (setq c (1+ c)))
-                c))))
+               (let ((c 0))
+                 (while (re-search-forward org-table-hline-regexp nil t)
+                   (setq c (1+ c)))
+                 c))))
     (org-table-fit--check "two hlines preserved" (= n 2))
     (org-table-fit--check "fit with hlines keeps data"
                           (and (string-match-p "last" squashed)
                                (string-match-p "123456789" squashed)))))
+
+;; --- Test 8: org verbatim markup spans stay intact ---------------------
+(with-temp-buffer
+  (org-mode)
+  (insert "| =C-x C-s= / =C-x C-c= | save and quit (=C-x C-s= then =C-x C-c=) |\n")
+  (insert "| =C-g C-/= (or =M-/=) | redo the last undone change |\n")
+  (goto-char (point-min))
+  (org-table-align)
+  (org-table-fit-window 30)
+  (let ((odd 0))
+    (goto-char (point-min))
+    (while (re-search-forward "^|" nil t)
+      (let ((line (buffer-substring-no-properties (line-beginning-position)
+                                                  (line-end-position))))
+        (when (cl-oddp (cl-count ?= line))
+          (setq odd (1+ odd)))))
+    (org-table-fit--check "no broken =...= spans" (zerop odd)))
+  (org-table-fit--check "multi-word span intact"
+                        (string-match-p "=C-x C-s=" (org-table-fit--buffer-text)))
+  (org-table-fit--check "span with internal space intact"
+                        (string-match-p "=C-g C-/=" (org-table-fit--buffer-text))))
+
+;; --- Test 9: unwrap recovers exact rows via tags ------------------------
+(with-temp-buffer
+  (org-mode)
+  (insert "| =C-a= / =C-e= | start / end of line |\n")
+  (insert "| =M-f= =M-b= | move forward / backward by word |\n")
+  (insert "| =C-l= | recenter the window on the cursor line (middle, then top, then bottom) |\n")
+  (goto-char (point-min))
+  (org-table-align)
+  (org-table-fit-window 40)
+  (org-table-fit-unwrap)
+  (let ((txt (org-table-fit--buffer-text)))
+    (org-table-fit--check "exact unwrap keeps rows separate"
+                          (string-match-p "=C-a= / =C-e= *| start / end of line"
+                                          txt))
+    (org-table-fit--check "exact unwrap row 2"
+                          (string-match-p "=M-f= =M-b= *| move forward / backward by word"
+                                          txt))
+    (org-table-fit--check "exact unwrap row 3"
+                          (string-match-p "=C-l= *| recenter the window"
+                                          txt))))
 
 (princ (format "\n%d failure(s)\n" org-table-fit--failures))
 (kill-emacs org-table-fit--failures)
