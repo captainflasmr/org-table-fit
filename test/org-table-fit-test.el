@@ -203,5 +203,24 @@
                           (string-match-p "=C-l= *| recenter the window"
                                           txt))))
 
+;; --- Test 10: dynamic mode installs resize hooks ------------------------
+(with-temp-buffer
+  (org-mode)
+  (insert "| a b c d e f g h i j k l m n o p q r s t | x |\n")
+  (insert "|---+---|\n")
+  (insert "| 1 2 3 4 5 6 7 8 9 0 | y |\n")
+  (goto-char (point-min))
+  (org-table-align)
+  (org-table-fit-mode 1)
+  (org-table-fit--check "minor mode enables"
+                        org-table-fit-mode)
+  (org-table-fit--check "minor mode registers window-resize hook"
+                        (memq #'org-table-fit--after-change-or-window-size
+                              window-size-change-functions))
+    (org-table-fit-mode -1)
+  (org-table-fit--check "minor mode unregisters hooks"
+                        (not (memq #'org-table-fit--after-change-or-window-size
+                                   window-size-change-functions))))
+
 (princ (format "\n%d failure(s)\n" org-table-fit--failures))
 (kill-emacs org-table-fit--failures)

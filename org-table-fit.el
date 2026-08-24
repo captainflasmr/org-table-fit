@@ -65,6 +65,12 @@
   :group 'org
   :prefix "org-table-fit-")
 
+(defvar org-table-fit-mode nil
+  "Non-nil when `org-table-fit-mode' is enabled.")
+
+(defvar-local org-table-fit--resize-timer nil
+  "Debounced timer for scheduling a table refit.")
+
 (defcustom org-table-fit-width-fraction 0.95
   "Fraction of the window body width used as the fit target.
 The whole fitted table (borders and padding included) is kept within
@@ -419,6 +425,35 @@ Returns a string ending with a newline."
     (goto-char beg)
     (when (looking-at "[ \t]*")
       (buffer-substring-no-properties (match-beginning 0) (match-end 0)))))
+
+(defun org-table-fit--after-change-or-window-size (&rest _)
+  "Queue a refit for the current table when the window changes."
+  (when org-table-fit-mode
+    (when (org-at-table-p)
+      (when org-table-fit--resize-timer
+        (cancel-timer org-table-fit--resize-timer))
+      (setq org-table-fit--resize-timer
+            (run-with-idle-timer
+             0.1 nil
+             (lambda ()
+               (when (and org-table-fit-mode
+                          (org-at-table-p))
+                 (setq org-table-fit--resize-timer nil)
+                 (org-table-fit-window))))))))
+
+;;;###autoload
+(define-minor-mode org-table-fit-mode
+  "Automatically fit the current Org table to the current window width."
+  :lighter " OrgFit"
+  :global nil
+  (if org-table-fit-mode
+      (progn
+        (add-hook 'window-size-change-functions #'org-table-fit--after-change-or-window-size nil t)
+        (org-table-fit--after-change-or-window-size))
+    (when org-table-fit--resize-timer
+      (cancel-timer org-table-fit--resize-timer)
+      (setq org-table-fit--resize-timer nil))
+    (remove-hook 'window-size-change-functions #'org-table-fit--after-change-or-window-size t)))
 
 ;; -> commands
 
