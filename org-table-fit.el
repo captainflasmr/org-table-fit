@@ -4,7 +4,7 @@
 
 ;; Author: James Dyer <james@dyerdwelling.family>
 ;; URL: https://github.com/captainflasmr/org-table-fit
-;; Version: 0.1.3
+;; Version: 0.1.4
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: org, tables, convenience
 
@@ -323,6 +323,32 @@ Accepts either a list or a vector of widths."
      rows
      "\n")))
 
+(defun org-table-fit--replace-table (beg end rendered wrapped row-starts)
+  "Replace table in BEG..END with RENDERED, preserving point relative to table start."
+  (let* ((pt (point))
+         (inside (and (>= pt beg) (< pt end)))
+         (line-offset (when inside
+                        (count-lines beg (line-beginning-position))))
+         (col-offset (when inside
+                       (current-column))))
+    (atomic-change-group
+      (save-excursion
+        (goto-char beg)
+        (delete-region beg end)
+        (let ((start (point)))
+          (insert rendered)
+          (if wrapped
+              (progn
+                (put-text-property start (point) 'org-table-fit-wrapped t)
+                (org-table-fit--tag-row-starts start row-starts))
+            (remove-text-properties start (point)
+                                    '(org-table-fit-wrapped t
+                                      org-table-fit-row-start t))))))
+    (when inside
+      (goto-char beg)
+      (forward-line line-offset)
+      (move-to-column col-offset))))
+
 (defun org-table-fit--table-bounds ()
   (save-excursion
     (let ((pos (point)))
@@ -345,24 +371,27 @@ Accepts either a list or a vector of widths."
     (when (looking-at "[ \t]*")
       (buffer-substring-no-properties (match-beginning 0) (match-end 0)))))
 
-(defun org-table-fit--after-change-or-window-size (&rest _)
-  "Queue a refit for the table in the current window when window size changes."
-  (when (and org-table-fit-mode
-             (not org-table-fit--resize-timer))
-    (let ((buf (current-buffer))
-          (win (selected-window)))
+(defun org-table-fit--after-change-or-window-size (&optional frame-or-window)
+  "Queue a refit for the table when the window size changes."
+  (when org-table-fit-mode
+    (let* ((win (if (windowp frame-or-window)
+                    frame-or-window
+                  (selected-window)))
+           (buf (current-buffer)))
+      (when org-table-fit--resize-timer
+        (cancel-timer org-table-fit--resize-timer))
       (setq org-table-fit--resize-timer
-            (run-with-idle-timer
-             0.1 nil
+            (run-with-timer
+             0.05 nil
              (lambda ()
                (setq org-table-fit--resize-timer nil)
-               (when (buffer-live-p buf)
-                 (with-current-buffer buf
-                   (when (and org-table-fit-mode
-                              (window-live-p win)
-                              (eq (window-buffer win) buf)
-                              (with-selected-window win (org-at-table-p)))
-                     (with-selected-window win
+               (when (and (buffer-live-p buf)
+                          (window-live-p win)
+                          (eq (window-buffer win) buf))
+                 (with-selected-window win
+                   (with-current-buffer buf
+                     (when (and org-table-fit-mode
+                                (org-at-table-p))
                        (org-table-fit-window)))))))))))
 
 ;;;###autoload
@@ -438,13 +467,7 @@ Accepts either a list or a vector of widths."
                                  (mapcar (lambda (prow) (list :cells prow))
                                          physical)))))
                    (rendered (concat (org-table-fit--render-rows wrapped-rows widths indent) "\n")))
-              (atomic-change-group
-                (delete-region beg end)
-                (goto-char beg)
-                (let ((start (point)))
-                  (insert rendered)
-                  (put-text-property start (point) 'org-table-fit-wrapped t)
-                  (org-table-fit--tag-row-starts start (nreverse row-starts))))
+              (org-table-fit--replace-table beg end rendered t (nreverse row-starts))
               (message "org-table-fit: wrapped table to %d columns"
                        (org-table-fit--table-total-width widths)))))))))
 
@@ -473,15 +496,10 @@ Accepts either a list or a vector of widths."
                  do (setf (nth i widths)
                           (max (nth i widths) (string-width cell)))))
       (let ((rendered (concat (org-table-fit--render-rows replacement widths indent) "\n")))
-        (atomic-change-group
-          (delete-region beg end)
-          (goto-char beg)
-          (insert rendered)
-          (remove-text-properties beg (point)
-                                  '(org-table-fit-wrapped t
-                                    org-table-fit-row-start t))))
-      (message "org-table-fit: unwrapped table"))))
+        (org-table-fit--replace-table beg end rendered nil nil)
+        (message "org-table-fit: unwrapped table")))))
 
 (provide 'org-table-fit)
 
 ;;; org-table-fit.el ends here
+
