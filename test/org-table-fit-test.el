@@ -222,5 +222,139 @@
                         (not (memq #'org-table-fit--after-change-or-window-size
                                    window-size-change-functions))))
 
+;; --- Test 11: overlay display keeps source intact --------------------
+(with-temp-buffer
+  (org-mode)
+  (insert "| Header One | Header Two | Header Three | Header Four |\n")
+  (insert "|------------+------------+--------------+-------------|\n")
+  (insert "| alpha beta gamma delta epsilon zeta eta | 1 | short | long unbrokenwordthatrunsonthescreen |\n")
+  (insert "| omega | 2 | medium text here | fine |\n")
+  (goto-char (point-min))
+  (org-table-align)
+  (let ((before (org-table-fit--buffer-text)))
+    (goto-char (point-min))
+    (org-table-fit-display-table 60)
+    (org-table-fit--check "display creates one overlay"
+                          (= 1 (length org-table-fit--display-overlays)))
+    (let ((overlay (car org-table-fit--display-overlays)))
+      (org-table-fit--check "overlay hides source with display"
+                            (and overlay (equal (overlay-get overlay 'display) "")))
+      (org-table-fit--check "overlay found at table point"
+                            (eq overlay (org-table-fit--overlay-at (point-min))))
+      (let* ((rendered (and overlay (overlay-get overlay 'before-string)))
+             (lines (and rendered (split-string rendered "\n" t)))
+             (maxw (if lines (apply #'max (mapcar #'string-width lines)) 0)))
+        (org-table-fit--check "overlay rendering fits width 60" (<= maxw 60))
+        (org-table-fit--check "overlay keeps header text"
+                              (and rendered
+                                   (string-match-p "Header One" rendered)))
+        (org-table-fit--check "overlay keeps long word text"
+                              (and rendered
+                                   (string-match-p "unbrokenwordthat" rendered)))))
+    (org-table-fit--check "display leaves buffer text unchanged"
+                          (string= before (org-table-fit--buffer-text)))))
+
+;; --- Test 12: narrow table needs no overlay ---------------------------
+(with-temp-buffer
+  (org-mode)
+  (insert "| a | b |\n")
+  (insert "|---+---|\n")
+  (insert "| 1 | 2 |\n")
+  (goto-char (point-min))
+  (org-table-align)
+  (org-table-fit-display-table 60)
+  (org-table-fit--check "narrow table creates no overlay"
+                        (null org-table-fit--display-overlays)))
+
+;; --- Test 13: hide/toggle roundtrip ------------------------------------
+(with-temp-buffer
+  (org-mode)
+  (insert "| a b c d e f g h i j k l m n o p q r s t u | v w x y z |\n")
+  (insert "| 1 2 3 4 5 6 7 8 9 0 | plain |\n")
+  (goto-char (point-min))
+  (org-table-align)
+  (let ((source (org-table-fit--buffer-text)))
+    (goto-char (point-min))
+    (org-table-fit-display-table 40)
+    (org-table-fit-hide-table)
+    (org-table-fit--check "hide removes overlay"
+                          (null org-table-fit--display-overlays))
+    (org-table-fit--check "hide leaves source unchanged"
+                          (string= source (org-table-fit--buffer-text)))
+    (goto-char (point-min))
+    (org-table-fit-toggle-display 40)
+    (org-table-fit--check "toggle shows overlay"
+                          (= 1 (length org-table-fit--display-overlays)))
+    (org-table-fit--check "toggle keeps point at table"
+                          (org-at-table-p))
+    (org-table-fit-toggle-display)
+    (org-table-fit--check "toggle hides overlay again"
+                          (null org-table-fit--display-overlays))))
+
+;; --- Test 14: overlay mode refresh respects point ----------------------
+(with-temp-buffer
+  (org-mode)
+  (let ((org-table-fit-width-fraction 0.3)
+        (org-table-fit-overlay-relayout-delay 0))
+    (insert "intro text\n\n")
+    (insert "| alpha beta gamma delta epsilon zeta eta | 1 | short | long unbrokenwordthatrunsonthescreen |\n")
+    (insert "| omega | 2 | medium text here | fine |\n")
+    (insert "\ntrailing text\n")
+    (goto-char (point-min))
+    (search-forward "intro")
+    (org-table-fit-overlay-mode 1)
+    (org-table-fit--check "overlay mode enables" org-table-fit-overlay-mode)
+    (org-table-fit--check "overlay mode displays table away from point"
+                          (= 1 (length org-table-fit--display-overlays)))
+    (goto-char (point-min))
+    (search-forward "| alpha")
+    (org-table-fit-refresh-overlays)
+    (org-table-fit--check "refresh skips table at point"
+                          (null org-table-fit--display-overlays))
+    (let ((org-table-fit-overlay-reveal-on-point nil))
+      (org-table-fit-refresh-overlays)
+      (org-table-fit--check "refresh without reveal displays table"
+                            (= 1 (length org-table-fit--display-overlays))))
+    (org-table-fit--check "overlay mode registers post-command hook"
+                          (memq #'org-table-fit--display-post-command
+                                post-command-hook))
+    (org-table-fit-overlay-mode -1)
+    (org-table-fit--check "overlay mode clears overlays on disable"
+                          (null org-table-fit--display-overlays))
+    (org-table-fit--check "overlay mode unregisters hooks"
+                          (not (memq #'org-table-fit--display-post-command
+                                     post-command-hook)))))
+
+;; --- Test 15: destructive refit clears stale overlays ------------------
+(with-temp-buffer
+  (org-mode)
+  (insert "| a b c d e f g h i j k l m n o p q r s t u | v |\n")
+  (insert "| 1 2 3 4 5 6 | plain |\n")
+  (goto-char (point-min))
+  (org-table-align)
+  (goto-char (point-min))
+  (org-table-fit-display-table 40)
+  (org-table-fit--check "overlay present before refit"
+                        (= 1 (length org-table-fit--display-overlays)))
+  (goto-char (point-min))
+  (org-table-fit-window 40)
+  (org-table-fit--check "refit clears display overlay"
+                        (null org-table-fit--display-overlays)))
+
+;; --- Test 16: overlay keeps formula cells intact ------------------------
+(with-temp-buffer
+  (org-mode)
+  (insert "| a b c d e f g h i j k l m | =1+2 |\n")
+  (goto-char (point-min))
+  (org-table-align)
+  (goto-char (point-min))
+  (org-table-fit-display-table 20)
+  (let ((rendered (and (car org-table-fit--display-overlays)
+                       (overlay-get (car org-table-fit--display-overlays)
+                                    'before-string))))
+    (org-table-fit--check "overlay keeps formula cell intact"
+                          (and rendered
+                               (string-match-p "| *=1\\+2 *|" rendered)))))
+
 (princ (format "\n%d failure(s)\n" org-table-fit--failures))
 (kill-emacs org-table-fit--failures)

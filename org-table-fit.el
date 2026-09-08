@@ -15,6 +15,7 @@
 (require 'cl-lib)
 (require 'map)
 (require 'seq)
+(require 'subr-x)
 (require 'org)
 
 (defgroup org-table-fit nil
@@ -24,6 +25,9 @@
 
 (defvar org-table-fit-mode nil
   "Non-nil when `org-table-fit-mode' is enabled.")
+
+(defvar org-table-fit-overlay-mode nil
+  "Non-nil when `org-table-fit-overlay-mode' is enabled.")
 
 (defvar-local org-table-fit--resize-timer nil
   "Debounced timer for scheduling a table refit.")
@@ -37,6 +41,45 @@
   "Floor for column widths when the table cannot fit otherwise."
   :type 'integer
   :group 'org-table-fit)
+
+(defcustom org-table-fit-overlay-reveal-on-point t
+  "When non-nil, reveal a table's source while point is inside it.
+Mirrors `org-table-widget-reveal-on-point': the overlay returns as
+soon as point leaves the table."
+  :type 'boolean
+  :group 'org-table-fit)
+
+(defcustom org-table-fit-overlay-relayout-delay 0.15
+  "Idle seconds to wait before redisplaying overlays after resize/edits.
+A value of zero or less means redisplay immediately."
+  :type 'number
+  :group 'org-table-fit)
+
+(defvar-local org-table-fit--display-overlays nil
+  "Overlays displaying fitted tables in the current buffer.")
+
+(defvar-local org-table-fit--display-width nil
+  "Window width in columns the display overlays were last laid out for.")
+
+(defvar-local org-table-fit--display-timer nil
+  "Idle timer for a pending overlay relayout.")
+
+(defvar-local org-table-fit--display-inside nil
+  "Non-nil while point is inside a revealed (overlay-hidden) table.")
+
+(defvar-local org-table-fit--display-previous-point nil
+  "Marker recording point before the current command.")
+
+;; -> fit-planning (shared by replace and overlay paths)
+
+(defun org-table-fit--target-width (&optional width)
+  "Resolve WIDTH to a fit target in columns.
+A numeric WIDTH >= 10 is used directly; otherwise use the current
+window body width scaled by `org-table-fit-width-fraction'."
+  (if (and (integerp width) (>= width 10))
+      width
+    (floor (* (window-body-width)
+              org-table-fit-width-fraction))))
 
 ;; -> width-measurement
 
@@ -204,6 +247,56 @@ Accepts either a list or a vector of widths."
                                  ""))
                              wrapped))))
 
+(defun org-table-fit--logical-rows (beg end rows)
+  "Return logical ROWS for the table between BEG and END.
+If the region was wrapped by this package, merge continuation rows
+using the stored row-start tags; otherwise return ROWS unchanged."
+  (if (org-table-fit--wrapped-table-p beg end)
+      (org-table-fit--merge-continuations
+       rows (org-table-fit--collect-row-starts beg end))
+    rows))
+
+(defun org-table-fit--column-count (rows)
+  "Return the number of columns spanned by the data rows in ROWS."
+  (let ((data (cl-remove-if (lambda (r) (eq (car r) :hline)) rows)))
+    (apply #'max 1 (mapcar (lambda (r) (length (map-elt r :cells))) data))))
+
+(defun org-table-fit--natural-minimum-widths (data-rows cell-count)
+  "Return (NATURAL MINIMUM) column widths for DATA-ROWS."
+  (let ((natural (make-list cell-count 0))
+        (minimum (make-list cell-count 0)))
+    (dolist (row data-rows)
+      (cl-loop for cell in (map-elt row :cells)
+               for i from 0
+               do (setf (nth i natural)
+                        (max (nth i natural) (string-width cell))
+                        (nth i minimum)
+                        (max (nth i minimum)
+                             (org-table-fit--longest-word-width cell)))))
+    (list natural minimum)))
+
+(defun org-table-fit--wrap-all-rows (rows cell-count widths)
+  "Wrap ROWS to WIDTHS.  Return (WRAPPED-ROWS ROW-STARTS).
+ROW-STARTS marks the first physical line of each logical row and is
+stored as text properties by the destructive path so unwrapping can
+recover exact rows."
+  (let* ((row-starts nil)
+         (wrapped
+          (cl-loop for row in rows
+                  append
+                  (if (eq (car row) :hline)
+                      (progn (push nil row-starts) (list row))
+                    (let* ((cells (map-elt row :cells))
+                           (padded (append cells
+                                           (make-list
+                                            (max 0 (- cell-count (length cells)))
+                                            "")))
+                           (physical (org-table-fit--wrap-row padded widths)))
+                      (cl-loop for i from 0 below (length physical)
+                               do (push (= i 0) row-starts))
+                      (mapcar (lambda (prow) (list :cells prow)) physical))))))
+    (list wrapped (nreverse row-starts))))
+
 ;; -> table-io
 
 (defun org-table-fit--split-row (line)
@@ -323,8 +416,31 @@ Accepts either a list or a vector of widths."
      rows
      "\n")))
 
+(defun org-table-fit--remove-display-overlay (overlay)
+  "Delete display OVERLAY and forget it."
+  (delete-overlay overlay)
+  (setq org-table-fit--display-overlays
+        (delq overlay org-table-fit--display-overlays)))
+
+(defun org-table-fit--clear-display-overlays ()
+  "Remove every display overlay from the current buffer."
+  (mapc #'delete-overlay org-table-fit--display-overlays)
+  (setq org-table-fit--display-overlays nil))
+
+(defun org-table-fit--overlay-at (position)
+  "Return the display overlay covering POSITION, or nil."
+  (seq-find (lambda (overlay) (overlay-get overlay 'org-table-fit-display))
+            (overlays-in position (1+ position))))
+
+(defun org-table-fit--remove-display-overlays-in (beg end)
+  "Remove display overlays intersecting BEG..END without scheduling."
+  (dolist (overlay (overlays-in beg end))
+    (when (overlay-get overlay 'org-table-fit-display)
+      (org-table-fit--remove-display-overlay overlay))))
+
 (defun org-table-fit--replace-table (beg end rendered wrapped row-starts)
   "Replace table in BEG..END with RENDERED, preserving point relative to table start."
+  (org-table-fit--remove-display-overlays-in beg end)
   (let* ((pt (point))
          (inside (and (>= pt beg) (< pt end)))
          (line-offset (when inside
@@ -414,62 +530,34 @@ Accepts either a list or a vector of widths."
 (defun org-table-fit-window (&optional width)
   "Fit the org table at point to the current window width."
   (interactive "P")
-  (let* ((target (if (and (integerp width) (>= width 10))
-                     width
-                   (floor (* (window-body-width)
-                             org-table-fit-width-fraction))))
+  (let* ((target (org-table-fit--target-width width))
          (bounds (org-table-fit--table-bounds)))
     (unless bounds
       (user-error "Not in an org table"))
     (let* ((beg (car bounds))
            (end (cdr bounds))
            (indent (org-table-fit--table-indent beg))
-           (rows (org-table-fit--collect-rows beg end)))
-      (when (org-table-fit--wrapped-table-p beg end)
-        (setq rows (org-table-fit--merge-continuations
-                    rows (org-table-fit--collect-row-starts beg end))))
+           (rows (org-table-fit--logical-rows
+                  beg end (org-table-fit--collect-rows beg end))))
       (let* ((data-rows (cl-remove-if (lambda (r) (eq (car r) :hline)) rows))
-             (cell-count (apply #'max 1 (mapcar (lambda (r)
-                                                  (length (map-elt r :cells)))
-                                                data-rows)))
-             (natural (make-list cell-count 0))
-             (minimum (make-list cell-count 0)))
-        (dolist (row data-rows)
-          (cl-loop for cell in (map-elt row :cells)
-                   for i from 0
-                   do (setf (nth i natural)
-                            (max (nth i natural) (string-width cell))
-                            (nth i minimum)
-                            (max (nth i minimum)
-                                 (org-table-fit--longest-word-width cell)))))
+             (cell-count (org-table-fit--column-count rows))
+             (measured (org-table-fit--natural-minimum-widths
+                        data-rows cell-count))
+             (natural (nth 0 measured))
+             (minimum (nth 1 measured)))
         (if (<= (org-table-fit--table-total-width natural) target)
             (message "org-table-fit: table already fits (%d <= %d columns)"
                      (org-table-fit--table-total-width natural) target)
-          (let ((widths (org-table-fit--allocate-widths natural minimum target)))
-            (let* ((row-starts nil)
-                   (wrapped-rows
-                    (cl-loop for row in rows
-                             append
-                             (if (eq (car row) :hline)
-                                 (progn
-                                   (push nil row-starts)
-                                   (list row))
-                               (let* ((cells (map-elt row :cells))
-                                      (padded (append cells
-                                                      (make-list
-                                                       (max 0 (- cell-count
-                                                                 (length cells)))
-                                                       "")))
-                                      (physical (org-table-fit--wrap-row
-                                                 padded widths)))
-                                 (cl-loop for i from 0 below (length physical)
-                                          do (push (= i 0) row-starts))
-                                 (mapcar (lambda (prow) (list :cells prow))
-                                         physical)))))
-                   (rendered (concat (org-table-fit--render-rows wrapped-rows widths indent) "\n")))
-              (org-table-fit--replace-table beg end rendered t (nreverse row-starts))
-              (message "org-table-fit: wrapped table to %d columns"
-                       (org-table-fit--table-total-width widths)))))))))
+          (let* ((widths (org-table-fit--allocate-widths natural minimum target))
+                 (wrapped (org-table-fit--wrap-all-rows rows cell-count widths))
+                 (wrapped-rows (nth 0 wrapped))
+                 (row-starts (nth 1 wrapped))
+                 (rendered (concat (org-table-fit--render-rows
+                                    wrapped-rows widths indent)
+                                   "\n")))
+            (org-table-fit--replace-table beg end rendered t row-starts)
+            (message "org-table-fit: wrapped table to %d columns"
+                     (org-table-fit--table-total-width widths))))))))
 
 ;;;###autoload
 (defun org-table-fit-unwrap ()
@@ -498,6 +586,309 @@ Accepts either a list or a vector of widths."
       (let ((rendered (concat (org-table-fit--render-rows replacement widths indent) "\n")))
         (org-table-fit--replace-table beg end rendered nil nil)
         (message "org-table-fit: unwrapped table")))))
+
+;; -> overlay display (non-destructive, cf. org-table-widget)
+;; The buffer text is never modified.  Each fitted table is covered by
+;; an overlay whose `before-string' holds the wrapped rendering, so
+;; export, formulas and Babel keep seeing the original table.  Moving
+;; point into a table removes its overlay and reveals the source for
+;; ordinary `org-table' editing; moving point out lays it out again.
+
+(defun org-table-fit--tables ()
+  "Return (BEG . END) for every Org table in the accessible buffer."
+  (let (tables)
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward org-table-any-line-regexp nil t)
+        (if (org-at-table-p)
+            (let ((beg (org-table-begin))
+                  (end (org-table-end)))
+              (push (cons beg end) tables)
+              (goto-char end))
+          (forward-line 1))))
+    (nreverse tables)))
+
+(defun org-table-fit--display-layout-width ()
+  "Return the window body width available for display overlays.
+Uses the narrowest window showing the buffer, falling back to the
+selected window so commands also work in batch buffers."
+  (let ((windows (get-buffer-window-list (current-buffer) nil t)))
+    (if windows
+        (apply #'min (mapcar #'window-body-width windows))
+      (window-body-width))))
+
+(defun org-table-fit--build-display-string (beg end target)
+  "Return the fitted rendering for the table between BEG and END.
+Uses the shared wrapping pipeline on the logical rows.  Returns nil
+when the table already fits TARGET and needs no overlay."
+  (let* ((rows (org-table-fit--logical-rows
+                beg end (org-table-fit--collect-rows beg end)))
+         (data-rows (cl-remove-if (lambda (r) (eq (car r) :hline)) rows)))
+    (when data-rows
+      (let* ((cell-count (org-table-fit--column-count rows))
+             (measured (org-table-fit--natural-minimum-widths
+                        data-rows cell-count))
+             (natural (nth 0 measured))
+             (minimum (nth 1 measured)))
+        (unless (<= (org-table-fit--table-total-width natural) target)
+          (let* ((widths (org-table-fit--allocate-widths
+                          natural minimum target))
+                 (wrapped (org-table-fit--wrap-all-rows
+                           rows cell-count widths))
+                 (indent (org-table-fit--table-indent beg)))
+            (concat (org-table-fit--render-rows
+                     (nth 0 wrapped) widths indent)
+                    "\n")))))))
+
+(defun org-table-fit--display-modified (overlay &rest _)
+  "Reveal the source when the table under OVERLAY is modified."
+  (when (overlay-buffer overlay)
+    (with-current-buffer (overlay-buffer overlay)
+      (org-table-fit--remove-display-overlay overlay)
+      (org-table-fit--display-schedule))))
+
+(defun org-table-fit--display-table-in (beg end target)
+  "Cover the table between BEG and END with a fitted overlay.
+TARGET is the fit width in columns.  Returns the overlay, or nil
+when the table already fits."
+  (org-table-fit--remove-display-overlays-in beg end)
+  (when-let* ((rendered (org-table-fit--build-display-string beg end target)))
+    (let ((overlay (make-overlay beg end nil t nil)))
+      (overlay-put overlay 'org-table-fit-display t)
+      ;; Unlike replacement strings, before-strings honor pixel spaces
+      ;; and keep the source positions intact for editing/export.
+      (overlay-put overlay 'display "")
+      (overlay-put overlay 'before-string
+                   (if (eq (char-before end) ?\n)
+                       (concat rendered "\n")
+                     rendered))
+      (overlay-put overlay 'evaporate t)
+      (overlay-put overlay 'modification-hooks
+                   (list #'org-table-fit--display-modified))
+      (overlay-put overlay 'insert-in-front-hooks
+                   (list #'org-table-fit--display-modified))
+      (push overlay org-table-fit--display-overlays)
+      overlay)))
+
+;;;###autoload
+(defun org-table-fit-display-table (&optional width)
+  "Display the table at point fitted to WIDTH columns as an overlay.
+The buffer text is left untouched, unlike `org-table-fit-window'.
+With no prefix, use the window body width scaled by
+`org-table-fit-width-fraction'."
+  (interactive "P")
+  (let ((bounds (org-table-fit--table-bounds)))
+    (unless bounds
+      (user-error "Not in an org table"))
+    (let* ((target (if (and (integerp width) (>= width 10))
+                       width
+                     (floor (* (org-table-fit--display-layout-width)
+                               org-table-fit-width-fraction))))
+           (beg (car bounds))
+           (end (cdr bounds)))
+      (if (org-table-fit--display-table-in beg end target)
+          (message "org-table-fit: displaying fitted table")
+        (message "org-table-fit: table already fits (%d columns)" target)))))
+
+;;;###autoload
+(defun org-table-fit-hide-table ()
+  "Reveal the source of the table at point by removing its overlay."
+  (interactive)
+  (let ((overlay (org-table-fit--overlay-at (point))))
+    (if overlay
+        (progn
+          (org-table-fit--remove-display-overlay overlay)
+          (setq org-table-fit--display-inside t)
+          (message "org-table-fit: revealed table source"))
+      (message "org-table-fit: no display overlay here"))))
+
+;;;###autoload
+(defun org-table-fit-toggle-display (&optional width)
+  "Toggle the fitted overlay for the table at point."
+  (interactive "P")
+  (let ((overlay (or (org-table-fit--overlay-at (point))
+                     ;; Point may sit just past the overlay end after a
+                     ;; toggle that moved it out of a revealed table.
+                     (and (> (point) (point-min))
+                          (org-table-fit--overlay-at (1- (point)))))))
+    (cond
+     (overlay
+      (goto-char (overlay-start overlay))
+      (org-table-fit-hide-table))
+     ((org-at-table-p)
+      (let* ((bounds (org-table-fit--table-bounds))
+             (target (if (and (integerp width) (>= width 10))
+                         width
+                       (floor (* (org-table-fit--display-layout-width)
+                                 org-table-fit-width-fraction)))))
+        (if (org-table-fit--display-table-in (car bounds) (cdr bounds) target)
+            (progn
+              ;; With reveal-on-point active, point inside the newly
+              ;; covered table would make the post-command hook remove
+              ;; the overlay at once; move point out so the toggle
+              ;; sticks.  Without the mode, leave point alone.
+              (when org-table-fit-overlay-mode
+                (goto-char (cdr bounds))
+                (setq org-table-fit--display-inside nil))
+              (message "org-table-fit: displaying fitted table"))
+          (message "org-table-fit: table already fits (%d columns)" target))))
+     (t (user-error "Not at an Org table")))))
+
+;;;###autoload
+(defun org-table-fit-refresh-overlays ()
+  "Lay out every table in the buffer as a fitted overlay.
+A table containing point is left as source when
+`org-table-fit-overlay-reveal-on-point' is non-nil.  Tables that
+already fit need no overlay and are left alone."
+  (interactive)
+  (org-table-fit--display-cancel)
+  (org-table-fit--clear-display-overlays)
+  (let* ((width (org-table-fit--display-layout-width))
+         (target (floor (* width org-table-fit-width-fraction)))
+         (point (point)))
+    (save-excursion
+      (dolist (table (org-table-fit--tables))
+        (unless (and org-table-fit-overlay-reveal-on-point
+                     (>= point (car table))
+                     (< point (cdr table)))
+          (org-table-fit--display-table-in (car table) (cdr table) target))))
+    (setq org-table-fit--display-width width)))
+
+(defun org-table-fit--display-missing ()
+  "Display overlays for tables that have none, except the one at point."
+  (let* ((width (or org-table-fit--display-width
+                    (org-table-fit--display-layout-width)))
+         (target (floor (* width org-table-fit-width-fraction)))
+         (point (point)))
+    (save-excursion
+      (dolist (table (org-table-fit--tables))
+        (unless (or (org-table-fit--overlay-at (car table))
+                    (and org-table-fit-overlay-reveal-on-point
+                         (>= point (car table))
+                         (< point (cdr table))))
+          (org-table-fit--display-table-in (car table) (cdr table) target))))))
+
+(defun org-table-fit--display-cancel ()
+  "Cancel a pending overlay relayout."
+  (when org-table-fit--display-timer
+    (cancel-timer org-table-fit--display-timer)
+    (setq org-table-fit--display-timer nil)))
+
+(defun org-table-fit--display-run (buffer)
+  "Redisplay BUFFER's overlays when its window width changed."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq org-table-fit--display-timer nil)
+      (when org-table-fit-overlay-mode
+        (org-table-fit-refresh-overlays)))))
+
+(defun org-table-fit--display-schedule ()
+  "Redisplay overlays after the window configuration settles."
+  (when org-table-fit-overlay-mode
+    (org-table-fit--display-cancel)
+    (if (<= org-table-fit-overlay-relayout-delay 0)
+        (org-table-fit--display-run (current-buffer))
+      (setq org-table-fit--display-timer
+            (run-with-idle-timer org-table-fit-overlay-relayout-delay nil
+                                 #'org-table-fit--display-run
+                                 (current-buffer))))))
+
+(defun org-table-fit--display-window-changed ()
+  "Schedule a relayout when the window width changed."
+  (let ((width (org-table-fit--display-layout-width)))
+    (unless (equal width org-table-fit--display-width)
+      (org-table-fit--display-schedule))))
+
+(defun org-table-fit--display-after-change (_beg _end _len)
+  "Schedule a relayout after the buffer text changes."
+  (when org-table-fit-overlay-mode
+    (org-table-fit--display-schedule)))
+
+(defun org-table-fit--display-pre-command ()
+  "Record point so the direction of entry into a preview is known."
+  (when org-table-fit-overlay-reveal-on-point
+    (set-marker org-table-fit--display-previous-point (point))))
+
+(defun org-table-fit--display-post-command ()
+  "Reveal the table under point and restore overlays point has left."
+  (when org-table-fit-overlay-reveal-on-point
+    (let ((vertical-motion
+           (and (memq this-command '(previous-line next-line))
+                (bound-and-true-p line-move-visual)
+                org-table-fit--display-previous-point
+                (marker-position org-table-fit--display-previous-point)))
+          (overlay (org-table-fit--overlay-at (point))))
+      ;; Down can skip the entire replacement and land just past its end.
+      (when (and (not overlay) vertical-motion (> (point) (point-min)))
+        (let ((crossed (org-table-fit--overlay-at (1- (point)))))
+          (when (and crossed
+                     (= (point) (overlay-end crossed))
+                     (< org-table-fit--display-previous-point
+                        (overlay-start crossed)))
+            (setq overlay crossed)
+            (goto-char (overlay-start overlay)))))
+      (cond
+       (overlay
+        ;; Display-based vertical motion can land at the start of the whole
+        ;; preview even when entering from below (as in org-latex-preview).
+        ;; Do not redirect searches or other explicit jumps into the table.
+        (when (and vertical-motion
+                   (= (point) (overlay-start overlay))
+                   (>= org-table-fit--display-previous-point
+                       (overlay-end overlay)))
+          ;; Table overlays include the final newline, unlike LaTeX previews.
+          (goto-char (1- (overlay-end overlay)))
+          (beginning-of-line))
+        (org-table-fit--remove-display-overlay overlay)
+        (setq org-table-fit--display-inside t))
+       ((and org-table-fit--display-inside
+             (not (org-at-table-p)))
+        (setq org-table-fit--display-inside nil)
+        (org-table-fit--display-missing))
+       ((org-at-table-p)
+        (setq org-table-fit--display-inside t))))))
+
+;;;###autoload
+(define-minor-mode org-table-fit-overlay-mode
+  "Show Org tables as fitted, non-destructive overlays.
+The buffer text is left untouched; each wide table is covered by an
+overlay displaying its wrapped rendering.  Moving point into a table
+reveals its source for ordinary editing."
+  :lighter " OrgFitD"
+  :global nil
+  (if org-table-fit-overlay-mode
+      (progn
+        (unless (derived-mode-p 'org-mode)
+          (setq org-table-fit-overlay-mode nil)
+          (user-error "Org table overlays require Org mode"))
+        (unless org-table-fit--display-previous-point
+          (setq org-table-fit--display-previous-point (make-marker)))
+        (add-hook 'after-change-functions
+                  #'org-table-fit--display-after-change nil t)
+        (add-hook 'pre-command-hook
+                  #'org-table-fit--display-pre-command nil t)
+        (add-hook 'post-command-hook
+                  #'org-table-fit--display-post-command nil t)
+        (add-hook 'window-configuration-change-hook
+                  #'org-table-fit--display-window-changed nil t)
+        (add-hook 'text-scale-mode-hook
+                  #'org-table-fit--display-schedule nil t)
+        (org-table-fit-refresh-overlays))
+    (remove-hook 'after-change-functions
+                 #'org-table-fit--display-after-change t)
+    (remove-hook 'pre-command-hook
+                 #'org-table-fit--display-pre-command t)
+    (when org-table-fit--display-previous-point
+      (set-marker org-table-fit--display-previous-point nil)
+      (setq org-table-fit--display-previous-point nil))
+    (remove-hook 'post-command-hook
+                 #'org-table-fit--display-post-command t)
+    (remove-hook 'window-configuration-change-hook
+                 #'org-table-fit--display-window-changed t)
+    (remove-hook 'text-scale-mode-hook
+                 #'org-table-fit--display-schedule t)
+    (org-table-fit--display-cancel)
+    (org-table-fit--clear-display-overlays)))
 
 (provide 'org-table-fit)
 
