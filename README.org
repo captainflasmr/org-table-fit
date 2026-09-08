@@ -61,8 +61,17 @@ M-x org-table-fit-display-table  ;; overlay just the table at point
 M-x org-table-fit-hide-table     ;; reveal the source of the table at point
 M-x org-table-fit-toggle-display ;; toggle the overlay at point
 M-x org-table-fit-toggle-reveal-on-point ;; toggle editing vs. traversing
+M-x org-table-fit-next-row ;; step down one source row, stay on column 0
+M-x org-table-fit-prev-row ;; step up one source row, stay on column 0
 M-x org-table-fit-refresh-overlays
 #+end_src
+
+The row-stepping commands move by buffer lines (never skipping
+across a rendering) and never reveal the source.  While the overlay
+mode is on, the usual line motion keys do the context-sensitive
+thing automatically: ~C-n~ / ~C-p~ (and the arrow keys) step row by
+row with the cursor locked to the first column inside displayed
+tables, and behave exactly as before everywhere else.
 
 Tables that already fit need no overlay and are left as editable source.
 

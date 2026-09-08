@@ -431,6 +431,15 @@
                               (= (point) row1))
         (org-table-fit--check "overlays survive entry with reveal off"
                               (= 3 (length org-table-fit--display-overlays)))
+        ;; Landings stay at the start of the line even when motion
+        ;; started mid-line, so the cursor shows at the row start.
+        (set-marker org-table-fit--display-previous-point
+                    (save-excursion (goto-char above) (end-of-line) (point)))
+        (goto-char (cdr bounds))
+        (let ((this-command 'next-line))
+          (org-table-fit--display-post-command))
+        (org-table-fit--check "entry lands at line start, not mid-line"
+                              (and (= (point) row1) (bolp)))
         ;; Test 19: motion from a middle row steps to the next row.
         (set-marker org-table-fit--display-previous-point row1)
         (goto-char (cdr bounds))
@@ -520,6 +529,131 @@
                           org-table-fit-overlay-reveal-on-point)
     (org-table-fit--check "toggle reveals point table at once"
                           (null org-table-fit--display-overlays))
+    (org-table-fit-overlay-mode -1)))
+
+;; --- Tests 23-24: programmatic row stepping ---------------------------
+(with-temp-buffer
+  (org-mode)
+  (let ((org-table-fit-width-fraction 0.3)
+        (org-table-fit-overlay-relayout-delay 0)
+        (org-table-fit-overlay-reveal-on-point nil))
+    (insert "above\n\n| alpha beta gamma delta epsilon zeta eta theta iota | 1 |\n| omega sigma tau upsilon phi chi psi omega sigma | 2 |\n| short row here | 3 |\n\nbelow\n")
+    (goto-char (point-min))
+    (search-forward "above")
+    (org-table-fit-overlay-mode 1)
+    (goto-char (point-min))
+    (search-forward "| alpha")
+    (beginning-of-line)
+    (let ((row1 (point)))
+      (forward-line 1)
+      (let ((row2 (point)))
+        (forward-line 1)
+        (let ((row3 (point)))
+          ;; Test 23: forward-line stepping stays on column 0.
+          (goto-char row1)
+          (end-of-line)
+          (org-table-fit-next-row)
+          (org-table-fit--check "next-row steps one row"
+                                (= (point) row2))
+          (org-table-fit--check "next-row lands at line start"
+                                (bolp))
+          (org-table-fit--check "stepping keeps overlays"
+                                (= 3 (length org-table-fit--display-overlays)))
+          (org-table-fit-next-row 1)
+          (org-table-fit--check "next-row with arg steps rows"
+                                (= (point) row3))
+          (org-table-fit-prev-row)
+          (org-table-fit--check "prev-row steps back"
+                                (= (point) row2))
+          (org-table-fit-prev-row 1)
+          (org-table-fit--check "prev-row with arg steps rows"
+                                (= (point) row1))
+          ;; Test 24: stepping never reveals, even with reveal on.
+          ;; (Batch calls run no command loop, so invoke the
+          ;; post-command hook explicitly, as real keystrokes would.)
+          (let ((org-table-fit-overlay-reveal-on-point t))
+            (goto-char row1)
+            (org-table-fit-next-row)
+            (let ((this-command 'org-table-fit-next-row))
+              (org-table-fit--display-post-command))
+            (org-table-fit--check "stepping does not reveal with reveal on"
+                                  (= (point) row2))
+            (org-table-fit--check "keep flag is consumed"
+                                  (null org-table-fit--keep-display-once))
+            (org-table-fit--check "stepping keeps overlays with reveal on"
+                                  (= 3 (length org-table-fit--display-overlays)))))))
+    (org-table-fit-overlay-mode -1)))
+
+;; --- Tests 25-26: context-sensitive C-n / C-p -------------------------
+(org-table-fit--check "remap next-line to row stepping"
+                      (eq (lookup-key org-table-fit-overlay-mode-map
+                                      [remap next-line])
+                          #'org-table-fit-next-row-or-line))
+(org-table-fit--check "remap previous-line to row stepping"
+                      (eq (lookup-key org-table-fit-overlay-mode-map
+                                      [remap previous-line])
+                          #'org-table-fit-previous-row-or-line))
+(org-table-fit--check "line motion direction helper"
+                      (and (= 1 (let ((this-command 'next-line))
+                                  (org-table-fit--line-motion-direction)))
+                           (= 1 (let ((this-command 'org-table-fit-next-row-or-line))
+                                  (org-table-fit--line-motion-direction)))
+                           (= -1 (let ((this-command 'previous-line))
+                                   (org-table-fit--line-motion-direction)))
+                           (= -1 (let ((this-command 'org-table-fit-previous-row-or-line))
+                                   (org-table-fit--line-motion-direction)))
+                           (null (let ((this-command 'forward-char))
+                                   (org-table-fit--line-motion-direction)))))
+
+(with-temp-buffer
+  (org-mode)
+  (let ((org-table-fit-width-fraction 0.3)
+        (org-table-fit-overlay-relayout-delay 0)
+        (org-table-fit-overlay-reveal-on-point nil))
+    (insert "above\n\n| alpha beta gamma delta epsilon zeta eta theta iota | 1 |\n| omega sigma tau upsilon phi chi psi omega sigma | 2 |\n| short row here | 3 |\n\nbelow\n")
+    (goto-char (point-min))
+    (search-forward "above")
+    (beginning-of-line)
+    (let ((above (point)))
+      (org-table-fit-overlay-mode 1)
+      ;; Outside a table the remapped keys move by plain lines.
+      (goto-char above)
+      (org-table-fit-next-row-or-line)
+      (org-table-fit--check "row-or-line delegates outside tables"
+                            (= (point) (save-excursion
+                                         (goto-char above)
+                                         (forward-line 1)
+                                         (point))))
+      ;; Inside a displayed table they step rows on column 0, from any
+      ;; column of the hidden line (overlay-at matches per line).
+      (goto-char (point-min))
+      (search-forward "| alpha")
+      (end-of-line)
+      (org-table-fit--check "overlay-at finds row from mid-line"
+                            (org-table-fit--overlay-at (point)))
+      (let ((row1 (save-excursion (beginning-of-line) (point))))
+        (org-table-fit-next-row-or-line)
+        (org-table-fit--check "row-or-line steps rows in tables"
+                              (and (org-table-fit--overlay-at (point))
+                                   (bolp)
+                                   (= (save-excursion
+                                        (forward-line -1) (point))
+                                      row1)))
+        (org-table-fit--check "row-or-line keeps overlays"
+                              (= 3 (length org-table-fit--display-overlays)))
+        (org-table-fit-previous-row-or-line)
+        (org-table-fit--check "row-or-line steps back"
+                              (= (point) row1)))
+      ;; Skip correction also applies to the remapped commands.
+      (goto-char (point-min))
+      (search-forward "| alpha")
+      (let ((bounds (org-table-fit--table-bounds)))
+        (set-marker org-table-fit--display-previous-point above)
+        (goto-char (cdr bounds))
+        (let ((this-command 'org-table-fit-next-row-or-line))
+          (org-table-fit--display-post-command))
+        (org-table-fit--check "remapped motion enters first row"
+                              (= (point) (car bounds)))))
     (org-table-fit-overlay-mode -1)))
 
 (princ (format "\n%d failure(s)\n" org-table-fit--failures))

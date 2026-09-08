@@ -70,6 +70,12 @@ A value of zero or less means redisplay immediately."
 (defvar-local org-table-fit--display-previous-point nil
   "Marker recording point before the current command.")
 
+(defvar-local org-table-fit--keep-display-once nil
+  "When non-nil, keep display overlays for the next post-command.
+Set by the row-stepping commands so traversing a rendered table does
+not reveal its source even when reveal-on-point is enabled.
+Consumed (reset to nil) by `org-table-fit--display-post-command'.")
+
 ;; -> fit-planning (shared by replace and overlay paths)
 
 (defun org-table-fit--target-width (&optional width)
@@ -464,9 +470,15 @@ LINES holds that row's rendered strings."
   (setq org-table-fit--display-overlays nil))
 
 (defun org-table-fit--overlay-at (position)
-  "Return the display overlay covering POSITION, or nil."
+  "Return the display overlay covering POSITION, or nil.
+A row overlay typically ends at the line's end, so POSITION on that
+line counts as covered even though it is not strictly inside: use
+the overlay that covers the line, found via the line beginning."
   (seq-find (lambda (overlay) (overlay-get overlay 'org-table-fit-display))
-            (overlays-in position (1+ position))))
+            (overlays-in
+             (save-excursion (goto-char position)
+                             (min (point) (line-beginning-position)))
+             (1+ position))))
 
 (defun org-table-fit--remove-display-overlays-in (beg end)
   "Remove display overlays intersecting BEG..END without scheduling."
@@ -838,6 +850,63 @@ Refreshes the current buffer's overlays when
            (if org-table-fit-overlay-reveal-on-point "on" "off")))
 
 ;;;###autoload
+(defun org-table-fit-next-row (&optional arg)
+  "Move forward ARG source lines, landing at the beginning of the line.
+Unlike line motion this steps by buffer lines, so it traverses a
+displayed table one source row at a time instead of skipping across
+its rendering.  Each row's `cursor' property then shows the cursor on
+the matching rendered row.  This command alone never reveals the
+source, even with `org-table-fit-overlay-reveal-on-point' enabled."
+  (interactive "p")
+  (setq org-table-fit--keep-display-once t)
+  (forward-line (or arg 1))
+  (beginning-of-line))
+
+;;;###autoload
+(defun org-table-fit-prev-row (&optional arg)
+  "Move backward ARG source lines, landing at the beginning of the line.
+Like `org-table-fit-next-row' but upward.  This command alone never
+reveals a displayed table's source."
+  (interactive "p")
+  (setq org-table-fit--keep-display-once t)
+  (forward-line (- (or arg 1)))
+  (beginning-of-line))
+
+(defun org-table-fit--line-motion-direction ()
+  "Return 1 or -1 when this command is line motion, else nil.
+Covers `next-line', `previous-line' and the row-or-line commands
+bound by `org-table-fit-overlay-mode'."
+  (cond ((memq this-command '(next-line org-table-fit-next-row-or-line)) 1)
+        ((memq this-command '(previous-line org-table-fit-previous-row-or-line)) -1)
+        (t nil)))
+
+;;;###autoload
+(defun org-table-fit-next-row-or-line (&optional arg)
+  "Step down one row in a displayed table, else move like `next-line'.
+When point is on a displayed table row, move to the next source row
+and keep point at the start of the line (see `org-table-fit-next-row').
+Otherwise behave exactly like `next-line'."
+  (interactive "p")
+  (if (org-table-fit--overlay-at (point))
+      (org-table-fit-next-row arg)
+    ;; Deliberate interactive delegation: inherit goal column,
+    ;; shift-selection and everything else `next-line' does.
+    (with-no-warnings (next-line arg))))
+
+;;;###autoload
+(defun org-table-fit-previous-row-or-line (&optional arg)
+  "Step up one row in a displayed table, else move like `previous-line'.
+When point is on a displayed table row, move to the previous source
+row and keep point at the start of the line (see
+`org-table-fit-prev-row').  Otherwise behave exactly like
+`previous-line'."
+  (interactive "p")
+  (if (org-table-fit--overlay-at (point))
+      (org-table-fit-prev-row arg)
+    ;; Deliberate interactive delegation: see above.
+    (with-no-warnings (previous-line arg))))
+
+;;;###autoload
 (defun org-table-fit-toggle-display (&optional width)
   "Toggle the fitted overlay for the table at point."
   (interactive "P")
@@ -944,10 +1013,14 @@ already fit need no overlay and are left alone."
   (when org-table-fit-overlay-mode
     (set-marker org-table-fit--display-previous-point (point))))
 
-(defun org-table-fit--display-step-to-line (line-bol column)
-  "Move point to the source line starting at LINE-BOL, keeping COLUMN."
+(defun org-table-fit--display-step-to-line (line-bol)
+  "Move point to the start of the source line at LINE-BOL.
+Landings stay at the beginning of the line so point rests on hidden
+text covered by that row's `cursor' property (rather than on the
+visible newline, which would show the cursor at the end of the
+rendered row)."
   (goto-char line-bol)
-  (line-move-to-column column))
+  (beginning-of-line))
 
 (defun org-table-fit--display-correct-line-motion ()
   "Step line motion through displayed tables one source line at a time.
@@ -956,79 +1029,90 @@ landing past the table instead of inside it.  When
 `org-table-fit-overlay-reveal-on-point' is nil the overlays stay, so
 correct `next-line' and `previous-line' here: entering from outside
 lands on the first or last source line, and leaving from inside only
-happens one row at a time.  Anything that does not match a clean
-single-step skip (prefix-argument jumps, search, clicks) is left
-alone."
-  (when (and (memq this-command '(next-line previous-line))
-             org-table-fit--display-previous-point
-             (marker-position org-table-fit--display-previous-point))
-    (let* ((dir (if (eq this-command 'next-line) 1 -1))
-           (prev (marker-position org-table-fit--display-previous-point))
-           (here (point)))
+happens one row at a time.  Landings always go to the beginning of
+the line.  Anything that does not match a clean single-step skip
+(prefix-argument jumps, search, clicks) is left alone."
+  (let ((dir (and org-table-fit--display-previous-point
+                  (marker-position org-table-fit--display-previous-point)
+                  (org-table-fit--line-motion-direction))))
+    (when dir
+      (let* ((prev (marker-position org-table-fit--display-previous-point))
+             (here (point)))
       (unless (= prev here)
-        (let ((column (save-excursion (goto-char prev) (current-column))))
+        (let ((at-here (org-table-fit--overlay-at here))
+              (at-prev (org-table-fit--overlay-at prev)))
           (cond
-           ((org-table-fit--overlay-at prev)
-            ;; Started inside a displayed table: a correct single step
+           ;; Entering from below: landed exactly at the table's start
+           ;; after starting below it.  Step onto its last source line
+           ;; instead of resting on the first row.
+           ((and (not at-prev) (< dir 0) at-here
+                 (let ((bounds (save-excursion
+                                 (goto-char here)
+                                 (org-table-fit--table-bounds))))
+                   (and bounds (> prev (cdr bounds)) (= here (car bounds)))))
+            (let ((bounds (save-excursion
+                            (goto-char here)
+                            (org-table-fit--table-bounds))))
+              (org-table-fit--display-step-to-line
+               (org-table-fit--display-last-line-bol (cdr bounds)))))
+           ;; Resting inside a displayed table: keep point at the start
+           ;; of the line.  A preserved goal column would park point at
+           ;; the end of the hidden line, outside its row's `cursor'
+           ;; range, and the cursor would jump to the row end.
+           (at-here
+            (beginning-of-line))
+           (at-prev
+            ;; Started inside, now outside: a correct single step
             ;; either stays inside or exits exactly one line.  Landing
             ;; exactly at the far boundary from a non-exit row means
             ;; the motion skipped; pull it back one source line.
             (let ((bounds (save-excursion
                             (goto-char prev)
                             (org-table-fit--table-bounds))))
-              (when (and bounds (null (org-table-fit--overlay-at here)))
-                (let ((first-line (save-excursion
-                                    (goto-char (car bounds))
-                                    (line-number-at-pos)))
-                      (last-line (save-excursion
-                                   (goto-char (cdr bounds))
-                                   (when (bolp) (forward-line -1))
-                                   (line-number-at-pos)))
-                      (prev-line (save-excursion
-                                   (goto-char prev)
-                                   (line-number-at-pos))))
-                  (cond
-                   ((and (> dir 0) (= here (cdr bounds)) (< prev-line last-line))
-                    (goto-char prev)
-                    (forward-line 1)
-                    (line-move-to-column column))
-                   ((and (< dir 0) (= here (car bounds)) (> prev-line first-line))
-                    (goto-char prev)
-                    (forward-line -1)
-                    (line-move-to-column column)))))))
-           ((> dir 0)
-            ;; Started outside and moving down: landing exactly at a
-            ;; table's end after starting above it means the motion
-            ;; skipped the table; step onto its first source line.
-            (when (and (> here (point-min))
-                       (null (org-table-fit--overlay-at here))
-                       (org-table-fit--overlay-at (1- here)))
-              (let ((bounds (save-excursion
-                              (goto-char (1- here))
-                              (org-table-fit--table-bounds))))
-                (when (and bounds (< prev (car bounds)) (= here (cdr bounds)))
-                  (org-table-fit--display-step-to-line (car bounds) column)))))
-           (t
-            ;; Started outside and moving up: landing exactly at a
-            ;; table's start after starting below it means the motion
-            ;; skipped the table; step onto its last source line.
-            (let ((overlay (org-table-fit--overlay-at here)))
-              (when overlay
-                (let ((bounds (save-excursion
-                                (goto-char here)
-                                (org-table-fit--table-bounds))))
-                  (when (and bounds (> prev (cdr bounds)) (= here (car bounds)))
-                    (org-table-fit--display-step-to-line
-                     (org-table-fit--display-last-line-bol (cdr bounds))
-                     column))))))))))))
+            (when (and bounds (null (org-table-fit--overlay-at here)))
+              (let ((first-line (save-excursion
+                                  (goto-char (car bounds))
+                                  (line-number-at-pos)))
+                    (last-line (save-excursion
+                                 (goto-char (cdr bounds))
+                                 (when (bolp) (forward-line -1))
+                                 (line-number-at-pos)))
+                    (prev-line (save-excursion
+                                 (goto-char prev)
+                                 (line-number-at-pos))))
+                (cond
+                 ((and (> dir 0) (= here (cdr bounds)) (< prev-line last-line))
+                  (goto-char prev)
+                  (forward-line 1)
+                  (beginning-of-line))
+                 ((and (< dir 0) (= here (car bounds)) (> prev-line first-line))
+                  (goto-char prev)
+                  (forward-line -1)
+                  (beginning-of-line)))))))
+         ((> dir 0)
+          ;; Started outside and moving down: landing exactly at a
+          ;; table's end after starting above it means the motion
+          ;; skipped the table; step onto its first source line.
+          (when (and (> here (point-min))
+                     (null (org-table-fit--overlay-at here))
+                     (org-table-fit--overlay-at (1- here)))
+            (let ((bounds (save-excursion
+                            (goto-char (1- here))
+                            (org-table-fit--table-bounds))))
+              (when (and bounds (< prev (car bounds)) (= here (cdr bounds)))
+                (org-table-fit--display-step-to-line (car bounds))))))))
+)))))
 
 (defun org-table-fit--display-post-command ()
   "Reveal the table under point and restore overlays point has left."
   (when org-table-fit-overlay-mode
     (if (not org-table-fit-overlay-reveal-on-point)
         (org-table-fit--display-correct-line-motion)
-      (let ((vertical-motion
-             (and (memq this-command '(previous-line next-line))
+      (if org-table-fit--keep-display-once
+          ;; A row-stepping command asked to traverse without revealing.
+          (setq org-table-fit--keep-display-once nil)
+        (let ((vertical-motion
+             (and (org-table-fit--line-motion-direction)
                   (bound-and-true-p line-move-visual)
                   org-table-fit--display-previous-point
                   (marker-position org-table-fit--display-previous-point)))
@@ -1067,7 +1151,8 @@ alone."
           (setq org-table-fit--display-inside nil)
           (org-table-fit--display-missing))
          ((org-at-table-p)
-          (setq org-table-fit--display-inside t)))))))
+          (setq org-table-fit--display-inside t))))))))
+
 
 ;;;###autoload
 (define-minor-mode org-table-fit-overlay-mode
@@ -1077,9 +1162,16 @@ is covered by an overlay displaying its wrapped rendering.  Moving
 point into a table reveals its source for ordinary editing.  With
 `org-table-fit-overlay-reveal-on-point' set to nil the overlays stay
 and point can still traverse the table: each row guides the cursor to
-its rendered line."
+its rendered line.  Line motion keys step row by row inside displayed
+tables and behave normally everywhere else."
   :lighter " OrgFitD"
   :global nil
+  :keymap (let ((map (make-sparse-keymap)))
+            (define-key map [remap next-line]
+                        #'org-table-fit-next-row-or-line)
+            (define-key map [remap previous-line]
+                        #'org-table-fit-previous-row-or-line)
+            map)
   (if org-table-fit-overlay-mode
       (progn
         (unless (derived-mode-p 'org-mode)
