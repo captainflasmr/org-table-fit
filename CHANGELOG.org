@@ -1,0 +1,17 @@
+#+TITLE: org-table-fit Changelog
+
+* Unreleased
+** Added
+- Non-destructive overlay display inspired by ~org-table-widget~.  New commands ~org-table-fit-display-table~, ~org-table-fit-hide-table~, ~org-table-fit-toggle-display~ and ~org-table-fit-refresh-overlays~ cover wide tables with an overlay (~display ""~ + ~before-string~) so the buffer text stays intact for export, formulas and Babel.
+- New buffer-local minor mode ~org-table-fit-overlay-mode~.  It lays out every wide table as an overlay, reveals a table's source while point is inside it (including the upward-entry cursor correction), and redisplays after edits, window resizing and text scaling.
+- New options ~org-table-fit-overlay-reveal-on-point~ (default ~t~) and ~org-table-fit-overlay-relayout-delay~ (default ~0.15~).
+- Narrow tables need no overlay and are left as editable source.
+** Changed
+- Refactored ~org-table-fit-window~ onto shared planning helpers (~org-table-fit--target-width~, ~org-table-fit--logical-rows~, ~org-table-fit--column-count~, ~org-table-fit--natural-minimum-widths~, ~org-table-fit--wrap-all-rows~) used by both the destructive and the overlay paths.  Wrapping behavior is unchanged.
+- Destructive refit (~org-table-fit-window~) and unwrap (~org-table-fit-unwrap~) now clear stale display overlays in the replaced region.
+
+* Version 0.1.4
+- Destructive fit via ~org-table-fit-window~ with proportional width allocation and ~org-table-fit-unwrap~ restoring single-line rows.
+- Verbatim markup spans (~=...=~, ~ ~...~ ~, links) are kept intact while wrapping; formula cells (~=1+2~) are never wrapped.
+- Continuation rows are tracked with text properties so refit and unwrap recover exact rows.
+- Buffer-local ~org-table-fit-mode~ refits the table at point on window size changes.
