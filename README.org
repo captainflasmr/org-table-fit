@@ -7,7 +7,7 @@ non-destructive overlays.
 ~org-table-fit~ wraps wide Org tables so they fit the window.  It offers two ways to work:
 
 - Destructive fit :: ~org-table-fit-window~ rewrites the table at point into wrapped continuation rows; ~org-table-fit-unwrap~ restores the original single-line rows.  Wrapped state is tracked with text properties, so refitting a wrapped table merges its continuation rows first.
-- Overlay display :: ~org-table-fit-overlay-mode~ (inspired by [[https://github.com/yibie/org-table-widget][org-table-widget]]) covers wide tables with an overlay holding the wrapped rendering.  The buffer text is never modified, so export, formulas and Babel keep seeing the original table.  Moving point into a table reveals its source for ordinary editing; moving out lays it out again.
+- Overlay display :: ~org-table-fit-overlay-mode~ (inspired by [[https://github.com/yibie/org-table-widget][org-table-widget]]) covers each source line of wide tables with an overlay holding its wrapped rendering.  The buffer text is never modified, so export, formulas and Babel keep seeing the original table.  Moving point into a table reveals its source for ordinary editing; moving out lays it out again.  With revealing disabled ((setq org-table-fit-overlay-reveal-on-point nil)), point can still traverse the table and the cursor follows the rendered rows.
 
 Wrapping reuses one pipeline in both paths: natural/minimum column widths, proportional shrinking to the target width, and continuation-row merging.  Formula cells such as ~=1+2= and verbatim spans such as ~=C-x C-s=~ are never broken.
 
@@ -23,6 +23,22 @@ Clone the repository and add it to your ~load-path~:
 #+begin_src emacs-lisp
 (add-to-list 'load-path "/path/to/org-table-fit")
 (require 'org-table-fit)
+#+end_src
+
+With ~use-package~ (enables the overlay display in Org buffers,
+keeps tables traversable by default, ~C-c t r~ toggles editing):
+
+#+begin_src emacs-lisp
+(use-package org-table-fit
+  :load-path "~/.emacs.d/offline-packages/local-packages/org-table-fit"
+  :demand t
+  :hook (org-mode . org-table-fit-overlay-mode)
+  :bind (:map org-mode-map
+              ("C-c t f" . org-table-fit-window)
+              ("C-c t u" . org-table-fit-unwrap)
+              ("C-c t r" . org-table-fit-toggle-reveal-on-point))
+  :config
+  (setq org-table-fit-overlay-reveal-on-point nil))
 #+end_src
 
 * Usage
@@ -42,6 +58,7 @@ M-x org-table-fit-overlay-mode   ;; show all wide tables as overlays
 M-x org-table-fit-display-table  ;; overlay just the table at point
 M-x org-table-fit-hide-table     ;; reveal the source of the table at point
 M-x org-table-fit-toggle-display ;; toggle the overlay at point
+M-x org-table-fit-toggle-reveal-on-point ;; toggle editing vs. traversing
 M-x org-table-fit-refresh-overlays
 #+end_src
 
@@ -56,7 +73,7 @@ Tables that already fit need no overlay and are left as editable source.
 - ~org-table-fit-overlay-relayout-delay~ (default ~0.15~): idle seconds before redisplaying overlays after resizes or edits; zero or less means immediately.
 
 * Relation to org-table-widget
-The overlay display borrows its model from ~org-table-widget~: ~display ""~ + ~before-string~ overlays, reveal-on-point (including the upward-entry cursor correction), debounced relayout, and modification hooks.  Unlike that package there is no TextUI dependency and no pixel measurement; layout is character-cell based, so it works everywhere Org works.  See [[file:changelog.org][changelog.org]] for details.
+The overlay display borrows its model from ~org-table-widget~: ~display ""~ + ~before-string~ overlays, reveal-on-point (including the upward-entry cursor correction), debounced relayout, and modification hooks.  Unlike that package there is no TextUI dependency and no pixel measurement; layout is character-cell based, so it works everywhere Org works.  See [[file:CHANGELOG.org][CHANGELOG.org]] for details.
 
 * Contributing
 The implementation lives in ~org-table-fit.el~; the regression suite in ~test/org-table-fit-test.el~.  Run the suite with:

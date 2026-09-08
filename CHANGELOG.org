@@ -2,9 +2,13 @@
 
 * Unreleased
 ** Added
-- Non-destructive overlay display inspired by ~org-table-widget~.  New commands ~org-table-fit-display-table~, ~org-table-fit-hide-table~, ~org-table-fit-toggle-display~ and ~org-table-fit-refresh-overlays~ cover wide tables with an overlay (~display ""~ + ~before-string~) so the buffer text stays intact for export, formulas and Babel.
-- New buffer-local minor mode ~org-table-fit-overlay-mode~.  It lays out every wide table as an overlay, reveals a table's source while point is inside it (including the upward-entry cursor correction), and redisplays after edits, window resizing and text scaling.
+- Non-destructive overlay display inspired by ~org-table-widget~.  New commands ~org-table-fit-display-table~, ~org-table-fit-hide-table~, ~org-table-fit-toggle-display~ and ~org-table-fit-refresh-overlays~ cover wide tables with per-line overlays (~display ""~ + ~before-string~) so the buffer text stays intact for export, formulas and Babel.
+- New buffer-local minor mode ~org-table-fit-overlay-mode~.  It lays out every wide table as overlays, reveals a table's source while point is inside it (including the upward-entry cursor correction), and redisplays after edits, window resizing and text scaling.
+- Each row overlay carries an integer ~cursor~ property, so with ~org-table-fit-overlay-reveal-on-point~ set to nil point can still traverse the table and the cursor follows the matching rendered row.  Line motion that would skip across a displayed table steps into it instead.
 - New options ~org-table-fit-overlay-reveal-on-point~ (default ~t~) and ~org-table-fit-overlay-relayout-delay~ (default ~0.15~).
+- New command ~org-table-fit-toggle-reveal-on-point~ flipping reveal
+  on point (editing tables) versus traversing the rendering, bound to
+  ~C-c t r~ in the suggested ~org-mode-map~ setup.
 - Narrow tables need no overlay and are left as editable source.
 ** Changed
 - Refactored ~org-table-fit-window~ onto shared planning helpers (~org-table-fit--target-width~, ~org-table-fit--logical-rows~, ~org-table-fit--column-count~, ~org-table-fit--natural-minimum-widths~, ~org-table-fit--wrap-all-rows~) used by both the destructive and the overlay paths.  Wrapping behavior is unchanged.

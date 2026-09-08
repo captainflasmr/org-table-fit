@@ -394,27 +394,63 @@ recover exact rows."
         (put-text-property (point) (1+ (point)) 'org-table-fit-row-start t))
       (forward-line 1))))
 
+(defun org-table-fit--render-rule (widths indent)
+  "Render a horizontal rule for WIDTHS prefixed with INDENT."
+  (concat indent "|"
+          (mapconcat (lambda (w) (make-string (+ w 2) ?-))
+                     (vconcat widths)
+                     "+")
+          "|"))
+
+(defun org-table-fit--render-data-row (cells widths indent)
+  "Render CELLS as one aligned Org table line padded to WIDTHS."
+  (let ((vec-widths (vconcat widths)))
+    (let ((padded-cells
+           (cl-loop for i below (length vec-widths)
+                    for cell = (or (nth i cells) "")
+                    for w = (aref vec-widths i)
+                    for pad = (max 0 (- w (string-width cell)))
+                    collect (concat cell (make-string pad ?\s)))))
+      (concat indent "| " (mapconcat #'identity padded-cells " | ") " |"))))
+
 (defun org-table-fit--render-rows (rows widths indent)
   "Render ROWS as aligned Org table lines padded to WIDTHS and prefixed with INDENT."
-  (let ((vec-widths (vconcat widths)))
-    (mapconcat
-     (lambda (row)
-       (if (eq (car row) :hline)
-           (concat indent "|"
-                   (mapconcat (lambda (w) (make-string (+ w 2) ?-))
-                              vec-widths
-                              "+")
-                   "|")
-         (let* ((cells (map-elt row :cells))
-                (padded-cells
-                 (cl-loop for i below (length vec-widths)
-                          for cell = (or (nth i cells) "")
-                          for w = (aref vec-widths i)
-                          for pad = (max 0 (- w (string-width cell)))
-                          collect (concat cell (make-string pad ?\s)))))
-           (concat indent "| " (mapconcat #'identity padded-cells " | ") " |"))))
-     rows
-     "\n")))
+  (mapconcat
+   (lambda (row)
+     (if (eq (car row) :hline)
+         (org-table-fit--render-rule widths indent)
+       (org-table-fit--render-data-row (map-elt row :cells) widths indent)))
+   rows
+   "\n"))
+
+(defun org-table-fit--chunk-wrapped (rows wrapped row-starts widths indent)
+  "Group flat WRAPPED lines back under their logical ROWS.
+ROW-STARTS marks the first physical line of each logical row (see
+`org-table-fit--wrap-all-rows').  Returns a list with one (KIND .
+LINES) entry per logical row, where KIND is `hline' or `data' and
+LINES holds that row's rendered strings."
+  (let ((chunks nil)
+        (p 0)
+        (n (length wrapped)))
+    (dolist (row rows)
+      (if (eq (car row) :hline)
+          (progn
+            (push (cons 'hline (list (org-table-fit--render-rule widths indent)))
+                  chunks)
+            (setq p (1+ p)))
+        (let ((h 1))
+          (while (and (< (+ p h) n)
+                      (not (eq (car (nth (+ p h) wrapped)) :hline))
+                      (not (nth (+ p h) row-starts)))
+            (setq h (1+ h)))
+          (push (cons 'data
+                      (cl-loop for j from p below (+ p h)
+                               collect (org-table-fit--render-data-row
+                                        (map-elt (nth j wrapped) :cells)
+                                        widths indent)))
+                chunks)
+          (setq p (+ p h)))))
+    (nreverse chunks)))
 
 (defun org-table-fit--remove-display-overlay (overlay)
   "Delete display OVERLAY and forget it."
@@ -588,11 +624,16 @@ recover exact rows."
         (message "org-table-fit: unwrapped table")))))
 
 ;; -> overlay display (non-destructive, cf. org-table-widget)
-;; The buffer text is never modified.  Each fitted table is covered by
-;; an overlay whose `before-string' holds the wrapped rendering, so
-;; export, formulas and Babel keep seeing the original table.  Moving
-;; point into a table removes its overlay and reveals the source for
-;; ordinary `org-table' editing; moving point out lays it out again.
+;; The buffer text is never modified.  Each source line of a fitted
+;; table gets its own overlay whose `before-string' holds that line's
+;; wrapped rendering, so export, formulas and Babel keep seeing the
+;; original table.  Every row overlay carries an integer `cursor'
+;; property covering exactly its source line, so when
+;; `org-table-fit-overlay-reveal-on-point' is nil and point traverses
+;; the hidden source, the cursor follows the matching rendered row.
+;; With reveal enabled (the default), moving point into a table
+;; removes its overlays and reveals the source for ordinary
+;; `org-table' editing; moving point out lays it out again.
 
 (defun org-table-fit--tables ()
   "Return (BEG . END) for every Org table in the accessible buffer."
@@ -617,12 +658,75 @@ selected window so commands also work in batch buffers."
         (apply #'min (mapcar #'window-body-width windows))
       (window-body-width))))
 
-(defun org-table-fit--build-display-string (beg end target)
-  "Return the fitted rendering for the table between BEG and END.
-Uses the shared wrapping pipeline on the logical rows.  Returns nil
-when the table already fits TARGET and needs no overlay."
-  (let* ((rows (org-table-fit--logical-rows
-                beg end (org-table-fit--collect-rows beg end)))
+(defun org-table-fit--display-table-bounds-at (position)
+  "Return the table (BEG . END) containing POSITION, or nil."
+  (save-excursion
+    (goto-char position)
+    (org-table-fit--table-bounds)))
+
+(defun org-table-fit--display-last-line-bol (end)
+  "Return the beginning of the last source line ending at END."
+  (save-excursion
+    (goto-char end)
+    (when (bolp)
+      (forward-line -1))
+    (line-beginning-position)))
+
+(defun org-table-fit--display-make-row-overlay (beg end before)
+  "Cover the source line BEG..END with BEFORE as its rendering.
+BEFORE is shown as the overlay's `before-string' while `display \"\"'
+hides the source.  Its first character gets an integer `cursor'
+property spanning exactly this overlay, so the display engine shows
+the cursor on this row while point traverses the hidden line.
+Returns the overlay."
+  (let ((overlay (make-overlay beg end nil t nil)))
+    (overlay-put overlay 'org-table-fit-display t)
+    ;; Unlike replacement strings, before-strings honor pixel spaces
+    ;; and keep the source positions intact for editing/export.
+    (overlay-put overlay 'display "")
+    (when (and (> (length before) 0)
+                 (not (eq (aref before 0) ?\n)))
+      ;; No `cursor' on newlines: they have no graphic representation
+      ;; for the engine to find.  Renderings always start with indent
+      ;; or a border, so the first character is a safe anchor.
+      (put-text-property 0 1 'cursor (- end beg) before))
+    (overlay-put overlay 'before-string before)
+    (overlay-put overlay 'evaporate t)
+    (overlay-put overlay 'modification-hooks
+                 (list #'org-table-fit--display-modified))
+    (overlay-put overlay 'insert-in-front-hooks
+                 (list #'org-table-fit--display-modified))
+    (push overlay org-table-fit--display-overlays)
+    overlay))
+
+(defun org-table-fit--display-modified (overlay &rest _)
+  "Reveal the source when the table under OVERLAY is modified."
+  (when (overlay-buffer overlay)
+    (with-current-buffer (overlay-buffer overlay)
+      (let ((bounds (save-excursion
+                      (goto-char (overlay-start overlay))
+                      (org-table-fit--table-bounds))))
+        (if bounds
+            (org-table-fit--remove-display-overlays-in
+             (car bounds) (cdr bounds))
+          (org-table-fit--remove-display-overlay overlay)))
+      (org-table-fit--display-schedule))))
+
+(defun org-table-fit--display-table-in (beg end target)
+  "Cover each source line of the table between BEG and END with overlays.
+TARGET is the fit width in columns.  Returns the list of overlays,
+or nil when the table already fits TARGET."
+  (org-table-fit--remove-display-overlays-in beg end)
+  (let* ((raw (org-table-fit--collect-rows beg end))
+         (wrapped-source-p (org-table-fit--wrapped-table-p beg end))
+         (starts (if wrapped-source-p
+                     (org-table-fit--collect-row-starts beg end)
+                   (mapcar (lambda (row)
+                             (if (eq (car row) :hline) nil t))
+                           raw)))
+         (rows (if wrapped-source-p
+                   (org-table-fit--merge-continuations raw starts)
+                 raw))
          (data-rows (cl-remove-if (lambda (r) (eq (car r) :hline)) rows)))
     (when data-rows
       (let* ((cell-count (org-table-fit--column-count rows))
@@ -633,42 +737,55 @@ when the table already fits TARGET and needs no overlay."
         (unless (<= (org-table-fit--table-total-width natural) target)
           (let* ((widths (org-table-fit--allocate-widths
                           natural minimum target))
-                 (wrapped (org-table-fit--wrap-all-rows
-                           rows cell-count widths))
-                 (indent (org-table-fit--table-indent beg)))
-            (concat (org-table-fit--render-rows
-                     (nth 0 wrapped) widths indent)
-                    "\n")))))))
-
-(defun org-table-fit--display-modified (overlay &rest _)
-  "Reveal the source when the table under OVERLAY is modified."
-  (when (overlay-buffer overlay)
-    (with-current-buffer (overlay-buffer overlay)
-      (org-table-fit--remove-display-overlay overlay)
-      (org-table-fit--display-schedule))))
-
-(defun org-table-fit--display-table-in (beg end target)
-  "Cover the table between BEG and END with a fitted overlay.
-TARGET is the fit width in columns.  Returns the overlay, or nil
-when the table already fits."
-  (org-table-fit--remove-display-overlays-in beg end)
-  (when-let* ((rendered (org-table-fit--build-display-string beg end target)))
-    (let ((overlay (make-overlay beg end nil t nil)))
-      (overlay-put overlay 'org-table-fit-display t)
-      ;; Unlike replacement strings, before-strings honor pixel spaces
-      ;; and keep the source positions intact for editing/export.
-      (overlay-put overlay 'display "")
-      (overlay-put overlay 'before-string
-                   (if (eq (char-before end) ?\n)
-                       (concat rendered "\n")
-                     rendered))
-      (overlay-put overlay 'evaporate t)
-      (overlay-put overlay 'modification-hooks
-                   (list #'org-table-fit--display-modified))
-      (overlay-put overlay 'insert-in-front-hooks
-                   (list #'org-table-fit--display-modified))
-      (push overlay org-table-fit--display-overlays)
-      overlay)))
+                 (wrapped (org-table-fit--wrap-all-rows rows cell-count widths))
+                 (chunks (org-table-fit--chunk-wrapped
+                          rows (nth 0 wrapped) (nth 1 wrapped)
+                          widths (org-table-fit--table-indent beg)))
+                 (data-chunks (seq-filter (lambda (chunk)
+                                            (eq (car chunk) 'data))
+                                          chunks))
+                 (overlays nil))
+            ;; RAW has one entry per source line, so walk the buffer
+            ;; lines in lockstep.  Newline accounting: a row whose
+            ;; range hides its newline terminates its rendering with
+            ;; "\n" so following text starts on a fresh line; any
+            ;; other row leaves its visible source newline to do
+            ;; that.  Continuation lines of a previously wrapped
+            ;; table hide along with their newline and show nothing.
+            (save-excursion
+              (goto-char beg)
+              (cl-loop for rawrow in raw
+                       for start in starts
+                       do (let* ((lb (line-beginning-position))
+                                 (le (line-end-position))
+                                 (next (save-excursion (forward-line 1) (point)))
+                                 (last (save-excursion (forward-line 1)
+                                                       (>= (point) end)))
+                                 (extended (and last (> end le)))
+                                 (ov-end (if extended end le))
+                                 (terminator (if extended "\n" "")))
+                            (cond
+                             ((eq (car rawrow) :hline)
+                              (push (org-table-fit--display-make-row-overlay
+                                     lb ov-end
+                                     (concat (org-table-fit--render-rule
+                                              widths (org-table-fit--table-indent beg))
+                                             terminator))
+                                    overlays))
+                             (start
+                              (let* ((chunk (and data-chunks (pop data-chunks)))
+                                     (lines (or (cdr chunk) (list ""))))
+                                (push (org-table-fit--display-make-row-overlay
+                                       lb ov-end
+                                       (concat (mapconcat #'identity lines "\n")
+                                               terminator))
+                                      overlays)))
+                             ((< lb next)
+                              (push (org-table-fit--display-make-row-overlay
+                                     lb next "")
+                                    overlays))))
+                       (forward-line 1)))
+            (nreverse overlays)))))))
 
 ;;;###autoload
 (defun org-table-fit-display-table (&optional width)
@@ -692,15 +809,33 @@ With no prefix, use the window body width scaled by
 
 ;;;###autoload
 (defun org-table-fit-hide-table ()
-  "Reveal the source of the table at point by removing its overlay."
+  "Reveal the source of the table at point by removing its overlays."
   (interactive)
   (let ((overlay (org-table-fit--overlay-at (point))))
     (if overlay
-        (progn
-          (org-table-fit--remove-display-overlay overlay)
+        (let ((bounds (org-table-fit--display-table-bounds-at (point))))
+          (if bounds
+              (org-table-fit--remove-display-overlays-in
+               (car bounds) (cdr bounds))
+            (org-table-fit--remove-display-overlay overlay))
           (setq org-table-fit--display-inside t)
           (message "org-table-fit: revealed table source"))
       (message "org-table-fit: no display overlay here"))))
+
+;;;###autoload
+(defun org-table-fit-toggle-reveal-on-point ()
+  "Toggle whether display overlays reveal their table when point enters.
+Flips `org-table-fit-overlay-reveal-on-point': turn it on to edit
+tables normally, off to traverse the fitted rendering instead.
+Refreshes the current buffer's overlays when
+`org-table-fit-overlay-mode' is active so the change applies at once."
+  (interactive)
+  (setq org-table-fit-overlay-reveal-on-point
+        (not org-table-fit-overlay-reveal-on-point))
+  (when org-table-fit-overlay-mode
+    (org-table-fit-refresh-overlays))
+  (message "org-table-fit: reveal-on-point %s"
+           (if org-table-fit-overlay-reveal-on-point "on" "off")))
 
 ;;;###autoload
 (defun org-table-fit-toggle-display (&optional width)
@@ -806,54 +941,143 @@ already fit need no overlay and are left alone."
 
 (defun org-table-fit--display-pre-command ()
   "Record point so the direction of entry into a preview is known."
-  (when org-table-fit-overlay-reveal-on-point
+  (when org-table-fit-overlay-mode
     (set-marker org-table-fit--display-previous-point (point))))
+
+(defun org-table-fit--display-step-to-line (line-bol column)
+  "Move point to the source line starting at LINE-BOL, keeping COLUMN."
+  (goto-char line-bol)
+  (line-move-to-column column))
+
+(defun org-table-fit--display-correct-line-motion ()
+  "Step line motion through displayed tables one source line at a time.
+Visual line motion can skip across an overlay's `before-string',
+landing past the table instead of inside it.  When
+`org-table-fit-overlay-reveal-on-point' is nil the overlays stay, so
+correct `next-line' and `previous-line' here: entering from outside
+lands on the first or last source line, and leaving from inside only
+happens one row at a time.  Anything that does not match a clean
+single-step skip (prefix-argument jumps, search, clicks) is left
+alone."
+  (when (and (memq this-command '(next-line previous-line))
+             org-table-fit--display-previous-point
+             (marker-position org-table-fit--display-previous-point))
+    (let* ((dir (if (eq this-command 'next-line) 1 -1))
+           (prev (marker-position org-table-fit--display-previous-point))
+           (here (point)))
+      (unless (= prev here)
+        (let ((column (save-excursion (goto-char prev) (current-column))))
+          (cond
+           ((org-table-fit--overlay-at prev)
+            ;; Started inside a displayed table: a correct single step
+            ;; either stays inside or exits exactly one line.  Landing
+            ;; exactly at the far boundary from a non-exit row means
+            ;; the motion skipped; pull it back one source line.
+            (let ((bounds (save-excursion
+                            (goto-char prev)
+                            (org-table-fit--table-bounds))))
+              (when (and bounds (null (org-table-fit--overlay-at here)))
+                (let ((first-line (save-excursion
+                                    (goto-char (car bounds))
+                                    (line-number-at-pos)))
+                      (last-line (save-excursion
+                                   (goto-char (cdr bounds))
+                                   (when (bolp) (forward-line -1))
+                                   (line-number-at-pos)))
+                      (prev-line (save-excursion
+                                   (goto-char prev)
+                                   (line-number-at-pos))))
+                  (cond
+                   ((and (> dir 0) (= here (cdr bounds)) (< prev-line last-line))
+                    (goto-char prev)
+                    (forward-line 1)
+                    (line-move-to-column column))
+                   ((and (< dir 0) (= here (car bounds)) (> prev-line first-line))
+                    (goto-char prev)
+                    (forward-line -1)
+                    (line-move-to-column column)))))))
+           ((> dir 0)
+            ;; Started outside and moving down: landing exactly at a
+            ;; table's end after starting above it means the motion
+            ;; skipped the table; step onto its first source line.
+            (when (and (> here (point-min))
+                       (null (org-table-fit--overlay-at here))
+                       (org-table-fit--overlay-at (1- here)))
+              (let ((bounds (save-excursion
+                              (goto-char (1- here))
+                              (org-table-fit--table-bounds))))
+                (when (and bounds (< prev (car bounds)) (= here (cdr bounds)))
+                  (org-table-fit--display-step-to-line (car bounds) column)))))
+           (t
+            ;; Started outside and moving up: landing exactly at a
+            ;; table's start after starting below it means the motion
+            ;; skipped the table; step onto its last source line.
+            (let ((overlay (org-table-fit--overlay-at here)))
+              (when overlay
+                (let ((bounds (save-excursion
+                                (goto-char here)
+                                (org-table-fit--table-bounds))))
+                  (when (and bounds (> prev (cdr bounds)) (= here (car bounds)))
+                    (org-table-fit--display-step-to-line
+                     (org-table-fit--display-last-line-bol (cdr bounds))
+                     column))))))))))))
 
 (defun org-table-fit--display-post-command ()
   "Reveal the table under point and restore overlays point has left."
-  (when org-table-fit-overlay-reveal-on-point
-    (let ((vertical-motion
-           (and (memq this-command '(previous-line next-line))
-                (bound-and-true-p line-move-visual)
-                org-table-fit--display-previous-point
-                (marker-position org-table-fit--display-previous-point)))
-          (overlay (org-table-fit--overlay-at (point))))
-      ;; Down can skip the entire replacement and land just past its end.
-      (when (and (not overlay) vertical-motion (> (point) (point-min)))
-        (let ((crossed (org-table-fit--overlay-at (1- (point)))))
-          (when (and crossed
-                     (= (point) (overlay-end crossed))
-                     (< org-table-fit--display-previous-point
-                        (overlay-start crossed)))
-            (setq overlay crossed)
-            (goto-char (overlay-start overlay)))))
-      (cond
-       (overlay
-        ;; Display-based vertical motion can land at the start of the whole
-        ;; preview even when entering from below (as in org-latex-preview).
-        ;; Do not redirect searches or other explicit jumps into the table.
-        (when (and vertical-motion
-                   (= (point) (overlay-start overlay))
-                   (>= org-table-fit--display-previous-point
-                       (overlay-end overlay)))
-          ;; Table overlays include the final newline, unlike LaTeX previews.
-          (goto-char (1- (overlay-end overlay)))
-          (beginning-of-line))
-        (org-table-fit--remove-display-overlay overlay)
-        (setq org-table-fit--display-inside t))
-       ((and org-table-fit--display-inside
-             (not (org-at-table-p)))
-        (setq org-table-fit--display-inside nil)
-        (org-table-fit--display-missing))
-       ((org-at-table-p)
-        (setq org-table-fit--display-inside t))))))
+  (when org-table-fit-overlay-mode
+    (if (not org-table-fit-overlay-reveal-on-point)
+        (org-table-fit--display-correct-line-motion)
+      (let ((vertical-motion
+             (and (memq this-command '(previous-line next-line))
+                  (bound-and-true-p line-move-visual)
+                  org-table-fit--display-previous-point
+                  (marker-position org-table-fit--display-previous-point)))
+            (overlay (org-table-fit--overlay-at (point))))
+        ;; Down can skip the entire replacement and land just past its end.
+        (when (and (not overlay) vertical-motion (> (point) (point-min)))
+          (let ((crossed (org-table-fit--overlay-at (1- (point)))))
+            (when (and crossed
+                       (= (point) (overlay-end crossed))
+                       (< org-table-fit--display-previous-point
+                          (overlay-start crossed)))
+              (setq overlay crossed)
+              (goto-char (overlay-start overlay)))))
+        (cond
+         (overlay
+          (let ((bounds (org-table-fit--display-table-bounds-at (point))))
+            ;; Display-based vertical motion can land at the start of
+            ;; the whole preview even when entering from below (as in
+            ;; org-latex-preview).  Compare against the table bounds
+            ;; rather than this row's overlay.  Do not redirect
+            ;; searches or other explicit jumps into the table.
+            (when (and vertical-motion bounds
+                       (= (point) (car bounds))
+                       (>= org-table-fit--display-previous-point
+                           (cdr bounds)))
+              ;; Table overlays include the final newline, unlike LaTeX previews.
+              (goto-char (1- (cdr bounds)))
+              (beginning-of-line))
+            (if bounds
+                (org-table-fit--remove-display-overlays-in
+                 (car bounds) (cdr bounds))
+              (org-table-fit--remove-display-overlay overlay)))
+          (setq org-table-fit--display-inside t))
+         ((and org-table-fit--display-inside
+               (not (org-at-table-p)))
+          (setq org-table-fit--display-inside nil)
+          (org-table-fit--display-missing))
+         ((org-at-table-p)
+          (setq org-table-fit--display-inside t)))))))
 
 ;;;###autoload
 (define-minor-mode org-table-fit-overlay-mode
   "Show Org tables as fitted, non-destructive overlays.
-The buffer text is left untouched; each wide table is covered by an
-overlay displaying its wrapped rendering.  Moving point into a table
-reveals its source for ordinary editing."
+The buffer text is left untouched; each source line of a wide table
+is covered by an overlay displaying its wrapped rendering.  Moving
+point into a table reveals its source for ordinary editing.  With
+`org-table-fit-overlay-reveal-on-point' set to nil the overlays stay
+and point can still traverse the table: each row guides the cursor to
+its rendered line."
   :lighter " OrgFitD"
   :global nil
   (if org-table-fit-overlay-mode
