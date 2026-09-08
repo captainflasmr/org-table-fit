@@ -47,13 +47,19 @@
 
 Buffer keys:
 
-| Keys              | Action                                                                                                                                                                                        |
-|-------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| =M-<= / =M->=     | beginning / end of buffer                                                                                                                                                                     |
-| =M-j= / =M-k=     | 5 lines down / up                                                                                                                                                                             |
-| =C-M-n= / =C-M-p= | page down / up (one screenful; Emacs's =C-v= / =M-v=, which terminals steal for paste, and the =M-J= / =M-K= that gave way to window swap; both the kitty and legacy ESC-encodings are bound) |
-| =M-g= =M-z=       | go to a line number (prompt in the modeline) toggle soft wrap: long lines wrap at the window edge, or truncate (movement steps visual / logical lines)                                        |
-| =C-x k= =C-x C-k= | kill (close) the current buffer (modified file buffers ask first) kill region (point to mark)                                                                                                 |
+| Keys        | Action                                                                                 |
+|-------------+----------------------------------------------------------------------------------------|
+| =M-<= /     | beginning / end of buffer                                                              |
+| =M->=       |                                                                                        |
+| =M-j= /     | 5 lines down / up                                                                      |
+| =M-k=       |                                                                                        |
+| =C-M-n= /   | page down / up (one screenful; Emacs's =C-v= / =M-v=, which terminals steal for paste, |
+| =C-M-p=     | and the =M-J= / =M-K= that gave way to window swap; both the kitty and legacy          |
+|             | ESC-encodings are bound)                                                               |
+| =M-g= =M-z= | go to a line number (prompt in the modeline) toggle soft wrap: long lines wrap at the  |
+|             | window edge, or truncate (movement steps visual / logical lines)                       |
+| =C-x k=     | kill (close) the current buffer (modified file buffers ask first) kill region (point   |
+| =C-x C-k=   | to mark)                                                                               |
 
 Scrolling keeps the cursor at least 10 visual lines from the window's top and bottom edges (Emacs =scroll-margin=), reaching the edges only at the buffer's own start/end; =C-l= (recenter) now respects the same margin — middle puts point at the centre, top on the margin line, bottom the same distance from the bottom.
 

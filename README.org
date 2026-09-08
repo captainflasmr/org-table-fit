@@ -35,6 +35,8 @@ keeps tables traversable by default, ~C-c t r~ toggles editing):
   :hook (org-mode . org-table-fit-overlay-mode)
   :bind (:map org-mode-map
               ("C-c t f" . org-table-fit-window)
+              ("C-c t i" . org-table-fit-window)
+              ("C-c t t" . org-table-fit-overlay-mode)
               ("C-c t u" . org-table-fit-unwrap)
               ("C-c t r" . org-table-fit-toggle-reveal-on-point))
   :config
