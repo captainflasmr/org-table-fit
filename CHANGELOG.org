@@ -11,7 +11,7 @@
 - New options ~org-table-fit-overlay-reveal-on-point~ (default ~t~) and ~org-table-fit-overlay-relayout-delay~ (default ~0.15~).
 - New command ~org-table-fit-toggle-reveal-on-point~ flipping reveal
   on point (editing tables) versus traversing the rendering.
-  Suggested ~org-mode-map~ keys: ~C-c t i~/~C-c t f~ fit,
+  Suggested ~org-mode-map~ keys: ~C-c t i~ fit,
   ~C-c t t~ toggles the overlay mode, ~C-c t u~ unwraps,
   ~C-c t r~ toggles reveal on point.
 - New commands ~org-table-fit-next-row~ and ~org-table-fit-prev-row~
