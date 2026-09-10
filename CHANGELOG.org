@@ -24,6 +24,9 @@
   line, so the remapped keys engage from any column of a hidden row,
   not just column 0.
 - Narrow tables need no overlay and are left as editable source.
+** Fixed
+- Fit widths are now measured in characters of the remapped default face (~window-body-width~ with ~remap~).  Changing the font scale with ~text-scale-mode~ now reflows both destructive fits and display overlays instead of leaving them wider than the window.
+- ~org-table-fit-mode~ also refits on ~text-scale-mode-hook~, so destructive fits follow font scale changes as well.
 ** Changed
 - Refactored ~org-table-fit-window~ onto shared planning helpers (~org-table-fit--target-width~, ~org-table-fit--logical-rows~, ~org-table-fit--column-count~, ~org-table-fit--natural-minimum-widths~, ~org-table-fit--wrap-all-rows~) used by both the destructive and the overlay paths.  Wrapping behavior is unchanged.
 - Destructive refit (~org-table-fit-window~) and unwrap (~org-table-fit-unwrap~) now clear stale display overlays in the replaced region.

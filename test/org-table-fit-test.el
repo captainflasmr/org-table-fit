@@ -656,5 +656,59 @@
                               (= (point) (car bounds)))))
     (org-table-fit-overlay-mode -1)))
 
+;; --- Test 27: width follows a remapped (text-scaled) default face ------
+(with-temp-buffer
+  (org-mode)
+  (insert "| a b c d e f g h i j k l m n o p q r s t u | v w x y z |\n")
+  (insert "| 1 2 3 4 5 6 7 8 9 0 | plain |\n")
+  (goto-char (point-min))
+  (org-table-align)
+  (cl-letf (((symbol-function 'window-body-width)
+             (lambda (&optional _window pixelwise)
+               (if (eq pixelwise 'remap) 40 80))))
+    (org-table-fit--check "target width uses remapped char width"
+                          (= 38 (org-table-fit--target-width)))
+    (goto-char (point-min))
+    (org-table-fit-window)
+    (org-table-fit--check "destructive fit follows remapped width"
+                          (<= (org-table-fit--max-line-width) 38))))
+
+;; --- Test 28: overlay layout follows a remapped default face -----------
+(with-temp-buffer
+  (org-mode)
+  (insert "| Header One | Header Two | Header Three |\n")
+  (insert "|------------+------------+-------------|\n")
+  (insert "| alpha beta gamma delta epsilon zeta eta | 1 | short |\n")
+  (goto-char (point-min))
+  (org-table-align)
+  (cl-letf (((symbol-function 'window-body-width)
+             (lambda (&optional _window pixelwise)
+               (if (eq pixelwise 'remap) 40 80))))
+    (org-table-fit--check "layout width uses remapped char width"
+                          (= 40 (org-table-fit--display-layout-width)))
+    (goto-char (point-min))
+    (org-table-fit-display-table)
+    (let ((maxw 0))
+      (dolist (overlay org-table-fit--display-overlays)
+        (dolist (line (split-string (overlay-get overlay 'before-string)
+                                    "\n" t))
+          (setq maxw (max maxw (string-width line)))))
+      (org-table-fit--check "overlay display follows remapped width"
+                            (and org-table-fit--display-overlays
+                                 (<= maxw 38))))))
+
+;; --- Test 29: dynamic mode reacts to text scale changes ----------------
+(with-temp-buffer
+  (org-mode)
+  (insert "| a | b |\n")
+  (org-table-fit-mode 1)
+  (org-table-fit--check "minor mode registers text-scale hook"
+                        (memq #'org-table-fit--after-change-or-window-size
+                              text-scale-mode-hook))
+  (org-table-fit-mode -1)
+  (org-table-fit--check "minor mode unregisters text-scale hook"
+                        (not (memq #'org-table-fit--after-change-or-window-size
+                                   text-scale-mode-hook))))
+
 (princ (format "\n%d failure(s)\n" org-table-fit--failures))
 (kill-emacs org-table-fit--failures)

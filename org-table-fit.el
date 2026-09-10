@@ -81,10 +81,13 @@ Consumed (reset to nil) by `org-table-fit--display-post-command'.")
 (defun org-table-fit--target-width (&optional width)
   "Resolve WIDTH to a fit target in columns.
 A numeric WIDTH >= 10 is used directly; otherwise use the current
-window body width scaled by `org-table-fit-width-fraction'."
+window body width scaled by `org-table-fit-width-fraction'.
+The body width is measured in characters of the buffer's (possibly
+remapped, e.g. text-scaled) default face, so a font scale change
+adjusts the target."
   (if (and (integerp width) (>= width 10))
       width
-    (floor (* (window-body-width)
+    (floor (* (window-body-width nil 'remap)
               org-table-fit-width-fraction))))
 
 ;; -> width-measurement
@@ -566,11 +569,13 @@ the overlay that covers the line, found via the line beginning."
   (if org-table-fit-mode
       (progn
         (add-hook 'window-size-change-functions #'org-table-fit--after-change-or-window-size nil t)
+        (add-hook 'text-scale-mode-hook #'org-table-fit--after-change-or-window-size nil t)
         (org-table-fit--after-change-or-window-size))
     (when org-table-fit--resize-timer
       (cancel-timer org-table-fit--resize-timer)
       (setq org-table-fit--resize-timer nil))
-    (remove-hook 'window-size-change-functions #'org-table-fit--after-change-or-window-size t)))
+    (remove-hook 'window-size-change-functions #'org-table-fit--after-change-or-window-size t)
+    (remove-hook 'text-scale-mode-hook #'org-table-fit--after-change-or-window-size t)))
 
 ;; -> commands
 
@@ -663,12 +668,16 @@ the overlay that covers the line, found via the line beginning."
 
 (defun org-table-fit--display-layout-width ()
   "Return the window body width available for display overlays.
-Uses the narrowest window showing the buffer, falling back to the
-selected window so commands also work in batch buffers."
+Widths are counted in characters of the buffer's (possibly remapped,
+e.g. text-scaled) default face, so a font scale change adjusts the
+layout.  Uses the narrowest window showing the buffer, falling back
+to the selected window so commands also work in batch buffers."
   (let ((windows (get-buffer-window-list (current-buffer) nil t)))
     (if windows
-        (apply #'min (mapcar #'window-body-width windows))
-      (window-body-width))))
+        (apply #'min (mapcar (lambda (window)
+                               (window-body-width window 'remap))
+                             windows))
+      (window-body-width nil 'remap))))
 
 (defun org-table-fit--display-table-bounds-at (position)
   "Return the table (BEG . END) containing POSITION, or nil."
