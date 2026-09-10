@@ -710,5 +710,94 @@
                         (not (memq #'org-table-fit--after-change-or-window-size
                                    text-scale-mode-hook))))
 
+;; --- Test 30: covered rows hold point against redisplay adjustment -----
+(with-temp-buffer
+  (org-mode)
+  (insert "| a b c d e f g h i j k l m n o p q r s t | v w x y z |\n")
+  (insert "| 1 2 3 4 5 6 7 8 9 0 | plain |\n")
+  (goto-char (point-min))
+  (org-table-align)
+  (goto-char (point-min))
+  (org-table-fit-display-table 30)
+  (setq disable-point-adjustment nil)
+  (org-table-fit--display-hold-point)
+  (org-table-fit--check "hold-point flags a covered row"
+                        (and disable-point-adjustment
+                             (= (point) (point-min))))
+  (goto-char (point-max))
+  (setq disable-point-adjustment nil)
+  (org-table-fit--display-hold-point)
+  (org-table-fit--check "hold-point ignores an uncovered position"
+                        (null disable-point-adjustment))
+  (let ((bare (make-overlay (point-min) (1+ (point-min)))))
+    (overlay-put bare 'org-table-fit-display t)
+    (overlay-put bare 'display "")
+    (overlay-put bare 'before-string "")
+    (goto-char (point-min))
+    (org-table-fit--display-hold-point)
+    (org-table-fit--check "hold-point ignores an unanchored overlay"
+                          (null disable-point-adjustment))
+    (delete-overlay bare))
+  (goto-char (point-min))
+  (org-table-fit-next-row)
+  (org-table-fit--check "next-row holds its landing"
+                        (and disable-point-adjustment
+                             (bolp)
+                             (= (line-number-at-pos) 2))))
+
+;; --- Test 31: reveal-on entry lands on the boundary row start ----------
+(with-temp-buffer
+  (org-mode)
+  (let ((org-table-fit-width-fraction 0.3)
+        (org-table-fit-overlay-relayout-delay 0)
+        (org-table-fit-overlay-reveal-on-point t)
+        (line-move-visual t))
+    (insert "above\n\n| alpha beta gamma delta epsilon zeta eta theta iota | 1 |\n| omega sigma tau upsilon phi chi psi omega sigma | 2 |\n| short row here | 3 |\n\nbelow\n")
+    (goto-char (point-min))
+    (search-forward "above")
+    (beginning-of-line)
+    (let ((above (point)))
+      (org-table-fit-overlay-mode 1)
+      (let ((bounds (save-excursion
+                      (goto-char (point-min))
+                      (search-forward "| alpha")
+                      (beginning-of-line)
+                      (org-table-fit--table-bounds))))
+        ;; Entering from above: line motion landed at the end of the
+        ;; first displayed row; point must end at the first row start.
+        (set-marker org-table-fit--display-previous-point above)
+        (goto-char (overlay-end
+                    (seq-find (lambda (ov)
+                                (= (overlay-start ov) (car bounds)))
+                              org-table-fit--display-overlays)))
+        (let ((this-command 'next-line))
+          (org-table-fit--display-post-command))
+        (org-table-fit--check "reveal-on entry from above lands at row start"
+                              (and (= (point) (car bounds)) (bolp)))
+        (org-table-fit--check "reveal-on entry from above reveals the table"
+                              (null org-table-fit--display-overlays))
+        ;; Entering from below: line motion landed at the table start;
+        ;; point must end at the last row start.
+        (goto-char above)
+        (org-table-fit-refresh-overlays)
+        (let ((below (save-excursion
+                       (goto-char (point-min))
+                       (search-forward "below")
+                       (beginning-of-line)
+                       (point)))
+              (last-bol (save-excursion
+                          (goto-char (1- (cdr bounds)))
+                          (beginning-of-line)
+                          (point))))
+          (set-marker org-table-fit--display-previous-point below)
+          (goto-char (car bounds))
+          (let ((this-command 'previous-line))
+            (org-table-fit--display-post-command))
+          (org-table-fit--check "reveal-on entry from below lands at last row start"
+                                (and (= (point) last-bol) (bolp)))
+          (org-table-fit--check "reveal-on entry from below reveals the table"
+                                (null org-table-fit--display-overlays)))))
+    (org-table-fit-overlay-mode -1)))
+
 (princ (format "\n%d failure(s)\n" org-table-fit--failures))
 (kill-emacs org-table-fit--failures)

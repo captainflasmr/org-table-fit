@@ -71,7 +71,10 @@ across a rendering) and never reveal the source.  While the overlay
 mode is on, the usual line motion keys do the context-sensitive
 thing automatically: ~C-n~ / ~C-p~ (and the arrow keys) step row by
 row with the cursor locked to the first column inside displayed
-tables, and behave exactly as before everywhere else.
+tables, and behave exactly as before everywhere else.  Line motion
+that enters a displayed table lands on the first (from above) or
+last (from below) source row's start, so point stays at the left
+edge instead of snapping to the row end.
 
 Tables that already fit need no overlay and are left as editable source.
 

@@ -489,6 +489,23 @@ the overlay that covers the line, found via the line beginning."
     (when (overlay-get overlay 'org-table-fit-display)
       (org-table-fit--remove-display-overlay overlay))))
 
+(defun org-table-fit--display-hold-point ()
+  "Keep point on a displayed row from being pushed to the row end.
+Redisplay's point adjustment treats the overlays' empty `display'
+property as intangible and moves point out of the hidden source.
+Setting `disable-point-adjustment' suppresses that for the current
+command, so a landing at the start of a row survives redisplay and
+the row's `cursor' property shows the cursor at the rendered row's
+left edge.  Overlays without a `cursor' anchor (hidden continuation
+rows) are left to the normal adjustment."
+  (let* ((overlay (org-table-fit--overlay-at (point)))
+         (before (and overlay (overlay-get overlay 'before-string))))
+    (when (and (stringp before)
+               (> (length before) 0)
+               (not (eq (aref before 0) ?\n))
+               (get-text-property 0 'cursor before))
+      (setq disable-point-adjustment t))))
+
 (defun org-table-fit--replace-table (beg end rendered wrapped row-starts)
   "Replace table in BEG..END with RENDERED, preserving point relative to table start."
   (org-table-fit--remove-display-overlays-in beg end)
@@ -869,7 +886,8 @@ source, even with `org-table-fit-overlay-reveal-on-point' enabled."
   (interactive "p")
   (setq org-table-fit--keep-display-once t)
   (forward-line (or arg 1))
-  (beginning-of-line))
+  (beginning-of-line)
+  (org-table-fit--display-hold-point))
 
 ;;;###autoload
 (defun org-table-fit-prev-row (&optional arg)
@@ -879,7 +897,8 @@ reveals a displayed table's source."
   (interactive "p")
   (setq org-table-fit--keep-display-once t)
   (forward-line (- (or arg 1)))
-  (beginning-of-line))
+  (beginning-of-line)
+  (org-table-fit--display-hold-point))
 
 (defun org-table-fit--line-motion-direction ()
   "Return 1 or -1 when this command is line motion, else nil.
@@ -1116,10 +1135,14 @@ the line.  Anything that does not match a clean single-step skip
   "Reveal the table under point and restore overlays point has left."
   (when org-table-fit-overlay-mode
     (if (not org-table-fit-overlay-reveal-on-point)
-        (org-table-fit--display-correct-line-motion)
+        (progn
+          (org-table-fit--display-correct-line-motion)
+          (org-table-fit--display-hold-point))
       (if org-table-fit--keep-display-once
           ;; A row-stepping command asked to traverse without revealing.
-          (setq org-table-fit--keep-display-once nil)
+          (progn
+            (setq org-table-fit--keep-display-once nil)
+            (org-table-fit--display-hold-point))
         (let ((vertical-motion
              (and (org-table-fit--line-motion-direction)
                   (bound-and-true-p line-move-visual)
@@ -1138,18 +1161,22 @@ the line.  Anything that does not match a clean single-step skip
         (cond
          (overlay
           (let ((bounds (org-table-fit--display-table-bounds-at (point))))
-            ;; Display-based vertical motion can land at the start of
-            ;; the whole preview even when entering from below (as in
-            ;; org-latex-preview).  Compare against the table bounds
-            ;; rather than this row's overlay.  Do not redirect
-            ;; searches or other explicit jumps into the table.
+            ;; Display-based vertical motion can land anywhere on the
+            ;; hidden source depending on direction, so entering a
+            ;; displayed table by line motion lands on the boundary
+            ;; source line's start (first line from above, last from
+            ;; below).  Compare against the table bounds rather than
+            ;; this row's overlay.  Do not redirect searches or other
+            ;; explicit jumps into the table.
             (when (and vertical-motion bounds
-                       (= (point) (car bounds))
-                       (>= org-table-fit--display-previous-point
-                           (cdr bounds)))
-              ;; Table overlays include the final newline, unlike LaTeX previews.
-              (goto-char (1- (cdr bounds)))
-              (beginning-of-line))
+                       org-table-fit--display-previous-point)
+              (cond
+               ((< org-table-fit--display-previous-point (car bounds))
+                (goto-char (car bounds)))
+               ((>= org-table-fit--display-previous-point (cdr bounds))
+                ;; Table overlays include the final newline, unlike LaTeX previews.
+                (goto-char (1- (cdr bounds)))
+                (beginning-of-line))))
             (if bounds
                 (org-table-fit--remove-display-overlays-in
                  (car bounds) (cdr bounds))
