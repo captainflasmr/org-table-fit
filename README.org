@@ -86,7 +86,7 @@ Tables that already fit need no overlay and are left as editable source.
 - ~org-table-fit-overlay-relayout-delay~ (default ~0.15~): idle seconds before redisplaying overlays after resizes or edits; zero or less means immediately.
 
 * Relation to org-table-widget
-The overlay display borrows its model from ~org-table-widget~: ~display ""~ + ~before-string~ overlays, reveal-on-point (including the upward-entry cursor correction), debounced relayout, and modification hooks.  Unlike that package there is no TextUI dependency and no pixel measurement; layout is character-cell based, so it works everywhere Org works.  See [[file:CHANGELOG.org][CHANGELOG.org]] for details.
+The overlay display borrows its model from ~org-table-widget~: ~display ""~ + ~before-string~ overlays, reveal-on-point (including the upward-entry cursor correction), debounced relayout, and modification hooks.  Unlike that package there is no TextUI dependency.  Layout is character-cell based; on graphical frames the fit target is measured from the font actually used to display the table (a two-character ~window-text-pixel-size~ probe whose difference cancels per-line display decorations such as line-number gutters), so a table face that does not scale with the default face is still fitted correctly.  See [[file:CHANGELOG.org][CHANGELOG.org]] for details.
 
 * Contributing
 The implementation lives in ~org-table-fit.el~; the regression suite in ~test/org-table-fit-test.el~.  Run the suite with:

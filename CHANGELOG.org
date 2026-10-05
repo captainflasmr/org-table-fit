@@ -25,6 +25,8 @@
   not just column 0.
 - Narrow tables need no overlay and are left as editable source.
 ** Fixed
+- Fit targets are now measured in columns of the font actually used to display the table, not the remapped default face.  A table face that does not scale with the default face (for example ~org-table~ remapped to inherit a ~fixed-pitch~ face whose ~:height~ is pinned) is no longer wrapped too narrowly or left overflowing after a font scale change.  On graphical frames the table's border characters are measured through ~window-text-pixel-size~: the difference of the first two characters cancels per-line display decorations (a line-number gutter inflates the first character's measurement and squeezed tables to a fraction of the window), and the detected decoration is budgeted out of the window width.  The remapped default face remains the fallback on terminal frames.
+- Overlay and destructive modes also refresh on ~buffer-face-mode-hook~, so toggling ~variable-pitch-mode~ (or any other ~buffer-face-mode~ change) reflows tables at once.
 - Fit widths are now measured in characters of the remapped default face (~window-body-width~ with ~remap~).  Changing the font scale with ~text-scale-mode~ now reflows both destructive fits and display overlays instead of leaving them wider than the window.
 - ~org-table-fit-mode~ also refits on ~text-scale-mode-hook~, so destructive fits follow font scale changes as well.
 - Row navigation through a displayed table no longer snaps point/cursor to the right edge.  Redisplay treats the overlays' empty ~display~ property as intangible and pushed point out of the hidden source; landings now set ~disable-point-adjustment~ so the cursor stays on the rendered row's left edge.

@@ -697,6 +697,124 @@
                             (and org-table-fit--display-overlays
                                  (<= maxw 38))))))
 
+;; --- Test 28a: table target follows the table's own font --------------
+(with-temp-buffer
+  (org-mode)
+  (insert "| a b c d e f g h i j k l m n o p q r s t u | v w x y z |\n")
+  (goto-char (point-min))
+  (cl-letf (((symbol-function 'org-table-fit--table-char-pixel-width)
+             (lambda (&rest _) '(9 . 0)))
+            ((symbol-function 'window-body-width)
+             (lambda (&optional _window pixelwise)
+               (if (eq pixelwise t) 900 69))))
+    (org-table-fit--check "table target uses the table font pixel width"
+                          (= 95 (org-table-fit--table-target-width
+                                 (point-min))))
+    (org-table-fit--check "target ignores remapped default when table font known"
+                          (= 95 (org-table-fit--target-width)))))
+
+;; --- Test 28a2: target budgets out measured line decorations ----------
+;; A line-number gutter shows up as decoration on the table's first
+;; character (px1 = gutter + one char); the target must spend the
+;; gutter pixels of the window budget.
+(with-temp-buffer
+  (org-mode)
+  (insert "| a b c d e f g h i j k l m n o p q r s t u | v w x y z |\n")
+  (goto-char (point-min))
+  (cl-letf (((symbol-function 'org-table-fit--table-char-pixel-width)
+             (lambda (&rest _) '(9 . 36)))
+            ((symbol-function 'window-body-width)
+             (lambda (&optional _window pixelwise)
+               (if (eq pixelwise t) 900 100))))
+    (org-table-fit--check "table target budgets out line-number pixels"
+                          (= 91 (org-table-fit--table-target-width
+                                 (point-min))))))
+
+;; --- Test 28b: target falls back to the remapped default face ---------
+(with-temp-buffer
+  (org-mode)
+  (insert "| a | b |\n")
+  (goto-char (point-min))
+  (cl-letf (((symbol-function 'org-table-fit--table-char-pixel-width)
+             (lambda (&rest _) nil))
+            ((symbol-function 'window-body-width)
+             (lambda (&optional _window pixelwise)
+               (if (eq pixelwise 'remap) 40 80))))
+    (org-table-fit--check "target falls back to remapped default width"
+                          (= 38 (org-table-fit--target-width)))))
+
+;; --- Test 28c: display fitting uses the table font pixel width --------
+(with-temp-buffer
+  (org-mode)
+  (insert "| a b c d e f g h i j k l m n o p q r s t u | v w x y z |\n")
+  (insert "| 1 2 3 4 5 6 7 8 9 0 | plain |\n")
+  (goto-char (point-min))
+  (org-table-align)
+  (cl-letf (((symbol-function 'window-body-width)
+             (lambda (&optional _window pixelwise)
+               (if (eq pixelwise t) 300 30))))
+    (cl-letf (((symbol-function 'org-table-fit--table-char-pixel-width)
+               (lambda (&rest _) '(9 . 0))))
+      (goto-char (point-min))
+      (org-table-fit-display-table)
+      (let ((maxw 0))
+        (dolist (overlay org-table-fit--display-overlays)
+          (dolist (line (split-string (overlay-get overlay 'before-string)
+                                      "\n" t))
+            (setq maxw (max maxw (string-width line)))))
+        (org-table-fit--check "overlay fit uses the table font pixel width"
+                              (and org-table-fit--display-overlays
+                                   (<= maxw 31)))))
+    (org-table-fit-hide-table)
+    (cl-letf (((symbol-function 'org-table-fit--table-char-pixel-width)
+               (lambda (&rest _) '(9 . 36))))
+      (goto-char (point-min))
+      (org-table-fit-display-table)
+      (let ((maxw 0))
+        (dolist (overlay org-table-fit--display-overlays)
+          (dolist (line (split-string (overlay-get overlay 'before-string)
+                                      "\n" t))
+            (setq maxw (max maxw (string-width line)))))
+        (org-table-fit--check "overlay fit budgets out line-number pixels"
+                              (and org-table-fit--display-overlays
+                                   (<= maxw 27)))))))
+
+;; --- Test 28d: destructive fit uses the table font pixel width --------
+(with-temp-buffer
+  (org-mode)
+  (insert "| a b c d e f g h i j k l m n o p q r s t u | v w x y z |\n")
+  (insert "| 1 2 3 4 5 6 7 8 9 0 | plain |\n")
+  (goto-char (point-min))
+  (org-table-align)
+  (cl-letf (((symbol-function 'org-table-fit--table-char-pixel-width)
+             (lambda (&rest _) '(9 . 0)))
+            ((symbol-function 'window-body-width)
+             (lambda (&optional _window pixelwise)
+               (if (eq pixelwise t) 300 30))))
+    (goto-char (point-min))
+    (org-table-fit-window)
+    (org-table-fit--check "destructive fit uses the table font pixel width"
+                          (<= (org-table-fit--max-line-width) 31))))
+
+;; --- Test 28e: table char width is measured through the display -------
+;; The first character measures decoration + one char (12px), the
+;; second adds one more char (21px): the difference is one character
+;; (9px) and the decoration (3px) is detected.
+(with-temp-buffer
+  (org-mode)
+  (insert "| a | b |\n")
+  (cl-letf (((symbol-function 'window-live-p) (lambda (&rest _) t))
+            ((symbol-function 'window-buffer)
+             (lambda (&rest _) (current-buffer)))
+            ((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+            ((symbol-function 'window-text-pixel-size)
+             (lambda (&optional _window from to &rest _)
+               (cons (+ 3 (* 9 (- (or to 0) (or from 0)))) 20))))
+    (org-table-fit--check "table char pixel width measured from display"
+                          (equal '(9 . 3)
+                                 (org-table-fit--table-char-pixel-width
+                                  (selected-window) (point-min))))))
+
 ;; --- Test 29: dynamic mode reacts to text scale changes ----------------
 (with-temp-buffer
   (org-mode)
@@ -709,6 +827,31 @@
   (org-table-fit--check "minor mode unregisters text-scale hook"
                         (not (memq #'org-table-fit--after-change-or-window-size
                                    text-scale-mode-hook))))
+
+;; --- Test 29a: modes react to buffer face changes ----------------------
+(with-temp-buffer
+  (org-mode)
+  (insert "| a | b |\n")
+  (org-table-fit-mode 1)
+  (org-table-fit--check "minor mode registers buffer-face hook"
+                        (memq #'org-table-fit--after-change-or-window-size
+                              buffer-face-mode-hook))
+  (org-table-fit-mode -1)
+  (org-table-fit--check "minor mode unregisters buffer-face hook"
+                        (not (memq #'org-table-fit--after-change-or-window-size
+                                   buffer-face-mode-hook))))
+
+(with-temp-buffer
+  (org-mode)
+  (insert "| a | b |\n")
+  (org-table-fit-overlay-mode 1)
+  (org-table-fit--check "overlay mode registers buffer-face hook"
+                        (memq #'org-table-fit--display-schedule
+                              buffer-face-mode-hook))
+  (org-table-fit-overlay-mode -1)
+  (org-table-fit--check "overlay mode unregisters buffer-face hook"
+                        (not (memq #'org-table-fit--display-schedule
+                                   buffer-face-mode-hook))))
 
 ;; --- Test 30: covered rows hold point against redisplay adjustment -----
 (with-temp-buffer
